@@ -27,7 +27,7 @@ import { buildIdReply, decideAccess, ID_COMMAND, isIdCommand } from './access.js
 import { Config } from './config.js'
 import { YashiroGateway } from './gateway.js'
 import { buildUserText } from './message-text.js'
-import { DEFAULT_SYSTEM_PROMPT, renderSystemPrompt } from './prompt.js'
+import { DEFAULT_SYSTEM_PROMPT } from './prompt.js'
 import { SessionManager } from './sessions.js'
 import { defaultHistoryDbPath, HistoryStore, type StoredMessage } from './store.js'
 import { platformNowIso } from './time.js'
@@ -111,7 +111,7 @@ export function apply(ctx: Context, config: Config): void {
       agentCtx.systemPrompt.section({
         name: 'dsh-yashiro:channel',
         order: 90,
-        text: renderSystemPrompt(promptTemplate, { scope, peerId }),
+        text: promptTemplate,
       })
     }
   }

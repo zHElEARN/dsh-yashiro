@@ -85,7 +85,7 @@ export function buildUserText(msg: StoredMessage, options: UserTextOptions = {})
   if (options.newSinceLastWake !== undefined && options.newSinceLastWake > 0) {
     lines.push(
       '',
-      `（自你上次开口以来，群里还有 ${options.newSinceLastWake} 条新消息。需要的话用 qqbot_history 查。）`,
+      `（自你上次开口以来，群里还有 ${options.newSinceLastWake} 条新消息。）`,
     )
   }
 

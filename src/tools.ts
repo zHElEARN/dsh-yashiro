@@ -36,9 +36,7 @@ export function createHistoryTool(deps: ToolDeps) {
   const { store, config, scope, peerId } = deps
   return defineTool({
     name: 'qqbot_history',
-    description:
-      '查询当前群/单聊的历史聊天记录。群里所有人的发言都在库里，但不会自动进入你的上下文，' +
-      '需要了解之前聊过什么时用这个工具查。不传任何参数则返回最近若干条。',
+    description: '查询当前 QQ 群或单聊的历史消息记录。不传参数则返回最近若干条。',
     parameters: {
       query: {
         type: 'string',
@@ -132,15 +130,12 @@ export function createSendTool(deps: ToolDeps) {
   const { gateway, store, config, scope, peerId } = deps
   return defineTool({
     name: 'qqbot_send',
-    description:
-      '把一条消息发到当前 QQ 群/单聊里。这是你唯一能让群友看到你说话的方式——' +
-      '你的普通输出群友看不到，必须调用这个工具才会真正发出去。' +
-      '内容较长时会自动切分成多条。',
+    description: '把一条消息发送到当前 QQ 群或单聊。',
     parameters: {
       text: {
         type: 'string',
         required: true,
-        description: '要发送的内容。写成在群里聊天的口吻，不要写成报告。',
+        description: '要发送的内容。',
       },
     },
     output: {
