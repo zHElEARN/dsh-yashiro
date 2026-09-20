@@ -20,6 +20,15 @@ interface SessionEntry {
   dispose: () => Promise<void>
 }
 
+/** workspace 域（@deepseek-ai/dsh-workspace）里我们用到的最小面 */
+interface WorkspaceLike {
+  attachSession(sessionId: SessionId): Promise<void>
+}
+
+interface WorkspaceRegistryLike {
+  resolveByPath(path: string): Promise<WorkspaceLike | undefined>
+}
+
 export function sessionKeyOf(appId: string, scope: 'group' | 'c2c', peerId: string): string {
   return `yashiro:${appId}:${scope}:${peerId}`
 }
@@ -30,11 +39,14 @@ export function sessionIdOf(key: string): SessionId {
 
 export class SessionManager {
   private readonly sessions = new Map<string, SessionEntry>()
+  /** 解析出来的 workspace：undefined = 还没找过，null = 找过但没有 */
+  private workspaceEntity: WorkspaceLike | null | undefined
 
   constructor(
     private readonly ctx: Context,
     private readonly appId: string,
     private readonly cwd: string | undefined,
+    private readonly logger: { info(message: string): void; debug(message: string): void },
   ) {}
 
   /**
@@ -62,6 +74,53 @@ export class SessionManager {
     }
   }
 
+  /**
+   * 找到当前启动目录对应的 workspace（只找一次，找不到就记住"没有"）。
+   *
+   * 只有 profile 挂了 workspace 域（web bundle，或单独一行 @deepseek-ai/dsh-workspace）
+   * 才会有这个服务；没挂、或者启动目录不是已注册的 workspace，都返回 null。
+   */
+  private async resolveWorkspace(): Promise<WorkspaceLike | null> {
+    if (this.workspaceEntity !== undefined) return this.workspaceEntity
+    this.workspaceEntity = null
+
+    const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    if (registry === undefined || this.cwd === undefined) return null
+    try {
+      const found = await registry.resolveByPath(this.cwd)
+      if (found === undefined) {
+        this.logger.debug(`[dsh-yashiro] 启动目录不是已注册的 workspace，跳过挂载：${this.cwd}`)
+        return null
+      }
+      this.workspaceEntity = found
+      return found
+    } catch (err) {
+      this.logger.info(`[dsh-yashiro] 查找 workspace 失败（不影响对话）：${describe(err)}`)
+      return null
+    }
+  }
+
+  /**
+   * 把这条会话挂到 workspace 名下。
+   *
+   * web 侧边栏渲染的是 workspace 记录里的 sessionIds，而那份记录只有 web 进程
+   * 自己通过 API 建/派生会话时才会写入 —— 插件用 `ctx.agents.create()` 建出来的
+   * 会话不挂上去，就永远不会出现在侧边栏里。
+   *
+   * 挂载是幂等的：id 已在记录里时域内部直接空操作、不写盘。所以这里每条消息都
+   * 调一次 —— 侧边栏那份记录是整份文档覆盖写的，别的进程一写就可能把这条 id
+   * 抹掉，每次 @ 都补一下才能自愈。
+   */
+  private async attachToWorkspace(sessionId: SessionId): Promise<void> {
+    const workspace = await this.resolveWorkspace()
+    if (workspace === null) return
+    try {
+      await workspace.attachSession(sessionId)
+    } catch (err) {
+      this.logger.info(`[dsh-yashiro] 挂载 workspace 失败（不影响对话）：${describe(err)}`)
+    }
+  }
+
   /** 拿到（或建立）这个 QQ 会话对应的 agent */
   async getOrCreate(
     scope: 'group' | 'c2c',
@@ -69,17 +128,21 @@ export class SessionManager {
     setup: AgentSetup,
   ): Promise<Agent> {
     const key = sessionKeyOf(this.appId, scope, peerId)
+    const sessionId = sessionIdOf(key)
 
     const cached = this.sessions.get(key)
-    if (cached) return cached.agent
+    if (cached) {
+      await this.attachToWorkspace(sessionId)
+      return cached.agent
+    }
 
-    const sessionId = sessionIdOf(key)
     const agentOptions = this.resolveAgentOptions()
 
     // 1) 已经在 live registry 里（例如插件热重载后），直接复用 —— 但没有拆除权
     const live = this.ctx.agents.get(sessionId)
     if (live) {
       this.sessions.set(key, { agent: live, dispose: async () => {} })
+      await this.attachToWorkspace(sessionId)
       return live
     }
 
@@ -108,6 +171,7 @@ export class SessionManager {
 
     const created = handle
     this.sessions.set(key, { agent: created.agent, dispose: () => created.dispose() })
+    await this.attachToWorkspace(sessionId)
     return created.agent
   }
 
@@ -117,4 +181,8 @@ export class SessionManager {
     this.sessions.clear()
     await Promise.all(entries.map((e) => e.dispose().catch(() => {})))
   }
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err)
 }

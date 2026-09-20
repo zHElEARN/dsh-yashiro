@@ -50,7 +50,6 @@ const DEDUPE_WINDOW = 200
 export function apply(ctx: Context, config: Config): void {
   const store = new HistoryStore(config.historyDbPath?.trim() || defaultHistoryDbPath())
   const promptTemplate = config.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT
-  const sessions = new SessionManager(ctx, config.appId, config.cwd?.trim() || process.cwd())
 
   /** 上次唤醒 agent 的时间（每个会话），用来告诉它「你不在的时候群里又聊了多少」 */
   const lastWakeAt = new Map<string, number>()
@@ -88,6 +87,8 @@ export function apply(ctx: Context, config: Config): void {
     },
     debug: (m: string) => writeLog('DEBUG', m),
   }
+
+  const sessions = new SessionManager(ctx, config.appId, config.cwd?.trim() || process.cwd(), logger)
 
   const gateway = new YashiroGateway(
     config,
