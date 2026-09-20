@@ -19,9 +19,26 @@ export interface Config {
   /** agent 的工作目录；不填则用进程 cwd */
   cwd?: string
   /**
-   * 群白名单（group_openid）。为空表示不限制，机器人所在的任何群都服务。
+   * 群白名单（group_openid）。
+   *
+   * **空数组 = 一个群都不放行**（fail closed）。装完必须显式列群 id 才会工作。
+   * 不支持通配符：想开放就把 id 列全。
    */
   allowedGroups: string[]
+  /**
+   * 单聊白名单（user openid）。
+   *
+   * **空数组 = 一个都不放行**。想开单聊就把对方 openid 列进来。
+   */
+  allowedUsers: string[]
+  /**
+   * 发送者黑名单（openid）。
+   *
+   * 只拦「@ 机器人触发 agent」这一条路径，**不影响消息入库** ——
+   * 黑名单里的人发言照样进历史库，只是不会唤醒 agent。
+   * 不按昵称匹配：昵称可改、可重名，当安全边界不可靠。
+   */
+  blockedSenders: string[]
   /**
    * 历史库路径。不填则落在 `$DSH_HOME/storages/dsh-yashiro/history.db`。
    */
@@ -49,6 +66,8 @@ export const Config: Schema<Config> = Schema.object({
   sandbox: Schema.boolean().default(false),
   cwd: Schema.string(),
   allowedGroups: Schema.array(Schema.string()).default([]),
+  allowedUsers: Schema.array(Schema.string()).default([]),
+  blockedSenders: Schema.array(Schema.string()).default([]),
   historyDbPath: Schema.string(),
   historyDefaultLimit: Schema.number().default(30),
   historyMaxLimit: Schema.number().default(200),

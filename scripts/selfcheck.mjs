@@ -1,6 +1,7 @@
 import { HistoryStore } from '../dist/store.js'
 import { stripMentionMarkers, chunkText, normalizeInbound } from '../dist/gateway.js'
-import { formatTime, platformNowIso } from '../dist/tools.js'
+import { formatTime, platformNowIso } from '../dist/time.js'
+import { buildIdReply, decideAccess, isIdCommand } from '../dist/access.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rmSync } from 'node:fs'
@@ -50,6 +51,52 @@ const chunks = chunkText(many, 200)
 check('长文本被切分', chunks.length > 1)
 check('切分后无超长', chunks.every((c) => c.length <= 200), chunks.map(c => c.length).join(','))
 check('切分后内容无损', chunks.join('\n').replace(/\s/g, '') === many.replace(/\s/g, ''))
+
+console.log('— 访问控制 —')
+{
+  const GROUP = 'A22459EFEB65CFF0405CB716510F7C57'
+  const USER = '04929CA16A512F57CFBCC3AD77A5D640'
+  const OTHER = 'BBB'
+  const empty = { allowedGroups: [], allowedUsers: [], blockedSenders: [] }
+  const open = { allowedGroups: [GROUP], allowedUsers: [USER], blockedSenders: [] }
+  const g = (peerId, senderId) => ({ scope: 'group', peerId, senderId })
+
+  // 严格：空数组 = 全禁
+  check('空白名单：群消息被拒', decideAccess(g(GROUP, USER), empty).action === 'deny-peer')
+  check('空白名单：单聊被拒', decideAccess({ scope: 'c2c', peerId: USER, senderId: USER }, empty).action === 'deny-peer')
+  check('空白名单拒绝原因是 group-not-allowed', decideAccess(g(GROUP, USER), empty).reason === 'group-not-allowed')
+
+  // 放行
+  check('群在白名单 → 放行', decideAccess(g(GROUP, USER), open).action === 'allow')
+  check('群不在白名单 → 拒', decideAccess(g(OTHER, USER), open).action === 'deny-peer')
+  check('单聊在白名单 → 放行', decideAccess({ scope: 'c2c', peerId: USER, senderId: USER }, open).action === 'allow')
+  check('单聊不在白名单 → 拒', decideAccess({ scope: 'c2c', peerId: OTHER, senderId: USER }, open).action === 'deny-peer')
+
+  // 不支持通配符：'*' 只是个普通字符串，不会匹配任何真实 id
+  const star = { allowedGroups: ['*'], allowedUsers: [], blockedSenders: [] }
+  check("'*' 不是通配符", decideAccess(g(GROUP, USER), star).action === 'deny-peer')
+
+  // 黑名单：只拦发送者，会话本身仍然放行
+  const blocked = { allowedGroups: [GROUP], allowedUsers: [USER], blockedSenders: [OTHER] }
+  const d = decideAccess(g(GROUP, OTHER), blocked)
+  check('黑名单命中 → deny-sender', d.action === 'deny-sender' && d.reason === 'sender-blocked')
+  check('黑名单不影响旁观者', decideAccess(g(GROUP, USER), blocked).action === 'allow')
+  check('黑名单不按昵称匹配', decideAccess(g(GROUP, 'Zhe_Learn'), blocked).action === 'allow')
+
+  // /id 指令
+  check('@ + /id → 触发', isIdCommand('/id', true))
+  check('@ + 空白包裹的 /id → 触发', isIdCommand('  /id  ', true))
+  check('没 @ 就不触发', !isIdCommand('/id', false))
+  check('@ 但带参数不触发', !isIdCommand('/id foo', true))
+  check('@ 但 /idabc 不触发', !isIdCommand('/idabc', true))
+  check('@ 但普通消息不触发', !isIdCommand('帮我看看 /id 这个命令', true))
+
+  const gr = buildIdReply({ scope: 'group', peerId: GROUP, senderId: USER, senderName: 'Zhe_Learn' })
+  check('群 id 回复含 group_openid', gr.includes(GROUP))
+  check('群 id 回复含 sender openid', gr.includes(USER))
+  const cr = buildIdReply({ scope: 'c2c', peerId: USER, senderId: USER })
+  check('单聊 id 回复含 user openid', cr.includes(USER) && cr.includes('单聊'))
+}
 
 console.log('— 时间格式化（回归：UTC 与 +08:00 必须显示成同一时刻）—')
 {

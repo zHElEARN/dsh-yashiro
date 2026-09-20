@@ -54,6 +54,12 @@ QQ 群消息 ──▶ 归一化 ──▶ 历史库（全部入库）
 [32] tool/call        qqbot_send {"text":"你刚刚 18:41 跟我说的是一句「你好，回我一声」…再往前翻的话，18:37 你还发过…"}
 ```
 
+## 自检
+
+```sh
+pnpm selfcheck    # 50 项：访问控制、/id 指令、时间格式化、入库检索、@判定、切分
+```
+
 ## 安装
 
 ```sh
@@ -86,13 +92,52 @@ dsh --profile yashiro
 | `appId` / `appSecret` | 必填 | QQ 开放平台凭据 |
 | `sandbox` | `false` | 指向 `sandbox.api.sgroup.qq.com` |
 | `cwd` | 进程 cwd | agent 工作目录（决定会话落在哪个 workspace 分桶） |
-| `allowedGroups` | `[]` | 群 openid 白名单，空 = 不限制 |
+| `allowedGroups` | `[]` | 群 openid 白名单。**空 = 一个群都不放行**，必须显式列 |
+| `allowedUsers` | `[]` | 单聊 openid 白名单。**空 = 一个都不放行** |
+| `blockedSenders` | `[]` | 发送者 openid 黑名单。只拦 @ 触发，**不影响消息入库** |
 | `historyDbPath` | `$DSH_HOME/storages/dsh-yashiro/history.db` | 群历史库 |
 | `historyDefaultLimit` / `historyMaxLimit` | `30` / `200` | 单次查询条数 |
 | `sendChunkLimit` | `4500` | 单条消息最大字符数，超出自动切分 |
 | `announceNewMessageCount` | `true` | @ 时附带「你不在时群里又聊了几条」 |
 | `systemPrompt` | 内置 | 覆盖注入的系统提示词 |
 | `debug` | `false` | 打开后写 DEBUG 级文件日志 |
+
+## 访问控制
+
+三条规则，都是 **fail closed**（默认什么都不放行）：
+
+| 配置 | 作用范围 | 空数组的含义 |
+|---|---|---|
+| `allowedGroups` | 群聊（group_openid） | 一个群都不放行 |
+| `allowedUsers` | 单聊（user openid） | 一个都不放行 |
+| `blockedSenders` | 发送者（openid） | 没有黑名单 |
+
+**不支持通配符。** 想开放就把 id 列全，意图必须写死 —— `'*'` 只是个普通字符串，匹配不到任何真实 id。
+
+**黑名单只拦 @ 触发，不拦入库。** 黑名单里的人发言照样进历史库，只是不会唤醒 agent。
+不按昵称匹配：昵称可改、可重名，当安全边界不可靠。
+
+### `/id` 豁免指令
+
+自举问题：不知道 group openid 就没法配白名单。所以有一个**绕过全部访问控制**的指令：
+
+```
+你：@机器人 /id
+bot：群 ID（group_openid）：
+     A22459EFEB65CFF0405CB716510F7C57
+
+     你的 openid：
+     04929CA16A512F57CFBCC3AD77A5D640
+
+     昵称：Zhe_Learn
+```
+
+- **需要 @ 机器人**（避免群里有人随口打出 `/id` 就触发）
+- **精确匹配**整条消息（去掉首尾空白后完全等于 `/id`），带参数不触发
+- **群聊和单聊都支持**
+- **绕过白名单和黑名单** —— 即使这个群还没加进 `allowedGroups` 也能用
+- **不经过 dsh** —— 插件直接回复，不消耗模型调用
+- 回复内容也会记入历史库
 
 ## 平台侧的坑（实测踩出来的）
 
@@ -126,8 +171,8 @@ pnpm dump-session    # 打印本 workspace 最新一条会话的完整事件流
 
 - **没有斜杠命令**。要做的话，`SessionManager` 的 sessionKey 里再加一维（topic/epoch）
   就能天然支持「多会话切换」，不用改存储结构。
-- **没有发送者白名单**。目前任何能 @ 到机器人的群成员都能驱动一个**带 bash 权限**的
-  完整 agent。`allowedGroups` 只限制了群，没限制人。
+- **黑名单只有 openid 一种维度**，没有白名单模式。被放行的群里，除黑名单外的人都能
+  驱动一个**带 bash 权限**的完整 agent。
 - **审批无人应答**：headless profile 下 `approval/policy = ask` 但没有应答方，
   需要审批的操作会 fail closed。要放开得自己做 QQ 侧按钮通道。
 - **不做富媒体下载**。图片/语音的 URL 会入库，但插件不下载文件。

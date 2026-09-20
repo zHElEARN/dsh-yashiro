@@ -12,6 +12,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Config } from './config.js'
 import type { YashiroGateway } from './gateway.js'
 import type { HistoryStore } from './store.js'
+import { formatTime, platformNowIso } from './time.js'
 
 export interface ToolDeps {
   store: HistoryStore
@@ -23,40 +24,6 @@ export interface ToolDeps {
 
 /** 单条消息在工具结果里的最大字符数，避免一次查询把上下文撑爆 */
 const PER_MESSAGE_CHARS = 400
-
-/**
- * 展示用时区。QQ 平台给的时间戳都带 +08:00，机器人自己写入的出站记录也统一按这个时区，
- * 保证 agent 在历史里看到的时间是一致的。
- */
-const DISPLAY_TIME_ZONE = 'Asia/Shanghai'
-
-/** `sv-SE` locale 的日期格式正好是 `YYYY-MM-DD HH:mm:ss`，用它做确定性格式化 */
-const TIME_FORMATTER = new Intl.DateTimeFormat('sv-SE', {
-  timeZone: DISPLAY_TIME_ZONE,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: false,
-})
-
-/**
- * 一律从 epoch 毫秒格式化，**不要**去切原始 timestamp 字符串。
- *
- * 之前就是切字符串出的 bug：平台消息是 `...+08:00`，而我们自己写入的出站记录是
- * `new Date().toISOString()`（UTC，`...Z`）。切前 19 位的话，机器人自己的发言会
- * 显示成比实际早 8 小时。
- */
-export function formatTime(ts: number): string {
-  return TIME_FORMATTER.format(new Date(ts))
-}
-
-/** 当前时间，写成与平台一致的 `+08:00` 形式 */
-export function platformNowIso(): string {
-  return `${TIME_FORMATTER.format(new Date()).replace(' ', 'T')}+08:00`
-}
 
 function truncate(text: string, limit: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()

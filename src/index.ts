@@ -23,11 +23,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
+import { buildIdReply, decideAccess, ID_COMMAND, isIdCommand } from './access.js'
 import { Config } from './config.js'
 import { YashiroGateway } from './gateway.js'
 import { DEFAULT_SYSTEM_PROMPT, renderSystemPrompt } from './prompt.js'
 import { SessionManager } from './sessions.js'
 import { defaultHistoryDbPath, HistoryStore, type StoredMessage } from './store.js'
+import { platformNowIso } from './time.js'
 import { createAgentTools } from './tools.js'
 
 export const name = 'dsh-yashiro'
@@ -127,26 +129,69 @@ export function apply(ctx: Context, config: Config): void {
     return lines.join('\n')
   }
 
+  /** 机器人自己发出的消息也记一笔，保持「历史里能看到双方说过的话」 */
+  function recordOutbound(scope: 'group' | 'c2c', peerId: string, text: string): void {
+    try {
+      store.append({
+        appId: config.appId,
+        scope,
+        peerId,
+        messageId: `outbound-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        senderId: 'SELF',
+        senderName: '你（机器人）',
+        content: text,
+        mentionsBot: false,
+        rawEventType: 'OUTBOUND',
+        timestamp: platformNowIso(),
+      })
+    } catch (err) {
+      logger.error(`[dsh-yashiro] 记录出站消息失败: ${describe(err)}`)
+    }
+  }
+
   async function handleMessage(msg: StoredMessage): Promise<void> {
-    // 1) 无论 @ 与否，全部进历史库
+    // 1) 无论 @ 与否、是否被放行，全部进历史库。
+    //    访问控制只决定「要不要唤醒 agent」，不决定「要不要记录」。
     try {
       store.append(msg)
     } catch (err) {
       logger.error(`[dsh-yashiro] 写入历史库失败: ${describe(err)}`)
     }
 
-    // 2) 群白名单
-    if (msg.scope === 'group' && config.allowedGroups.length > 0 && !config.allowedGroups.includes(msg.peerId)) {
+    // 2) `/id` 豁免指令：需要 @ 机器人，但绕过白名单与黑名单，插件直接回复、不进 dsh。
+    //    放在这里是为了打破自举 —— 不知道 group openid 就没法配白名单。
+    if (isIdCommand(msg.content, msg.mentionsBot)) {
+      try {
+        const reply = buildIdReply(msg)
+        await gateway.send(msg.scope, msg.peerId, reply)
+        recordOutbound(msg.scope, msg.peerId, reply)
+        logger.info(`[dsh-yashiro] 已响应 ${ID_COMMAND}：${msg.scope} ${msg.peerId}`)
+      } catch (err) {
+        logger.error(`[dsh-yashiro] 回复 ${ID_COMMAND} 失败: ${describe(err)}`)
+      }
       return
     }
 
-    // 3) 没 @ 机器人 → 只入库，不打扰 agent
+    // 3) 白名单：严格生效，空数组 = 全禁（群与单聊各一份，都不支持通配符）
+    const access = decideAccess(msg, config)
+    if (access.action === 'deny-peer') {
+      logger.debug(`[dsh-yashiro] 会话未放行（${access.reason}）：${msg.scope} ${msg.peerId}`)
+      return
+    }
+
+    // 4) 没 @ 机器人 → 只入库，不打扰 agent
     if (!msg.mentionsBot) {
       logger.debug(`[trace] 非 @ 消息，仅入库: ${JSON.stringify(msg.content.slice(0, 40))}`)
       return
     }
 
-    // 4) 去重
+    // 5) 发送者黑名单：只拦 @ 触发，消息已经在上面入过库了
+    if (access.action === 'deny-sender') {
+      logger.info(`[dsh-yashiro] 发送者在黑名单，跳过唤醒：${msg.senderId}`)
+      return
+    }
+
+    // 6) 去重
     const dedupeKey = `${msg.scope}:${msg.peerId}`
     let seen = seenMessages.get(dedupeKey)
     if (!seen) {
@@ -160,7 +205,7 @@ export function apply(ctx: Context, config: Config): void {
       if (first !== undefined) seen.delete(first)
     }
 
-    // 5) 统计「你不在的时候群里聊了多少」（首次唤醒不报，免得上来就是几千条）
+    // 7) 统计「你不在的时候群里聊了多少」（首次唤醒不报，免得上来就是几千条）
     const previousWake = lastWakeAt.get(dedupeKey)
     let newSinceLastWake: number | undefined
     if (config.announceNewMessageCount && previousWake !== undefined) {

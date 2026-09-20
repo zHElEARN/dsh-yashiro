@@ -18,8 +18,14 @@
         sandbox: false
         # agent 的工作目录；留空用进程 cwd
         cwd: ''
-        # 群白名单，留空 = 机器人所在的群都服务
+        # 访问控制（fail closed）
+        # allowedGroups 为空 = 一个群都不放行，必须显式列 group_openid 才会工作
+        # 不知道群 id 时：在群里发 /id，插件会直接回复群 id（不经过 agent）
         allowedGroups: []
+        # 单聊白名单（user openid），空 = 一个都不放行
+        allowedUsers: []
+        # 发送者黑名单（openid），只拦 @ 触发，不影响消息入库
+        blockedSenders: []
         # 群历史库路径；留空 = $DSH_HOME/storages/dsh-yashiro/history.db
         historyDbPath: ''
         historyDefaultLimit: 30
