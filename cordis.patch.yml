@@ -1,0 +1,29 @@
+# dsh-yashiro bundle patch
+#
+# 当本包通过 `dsh plugin --profile <name> add <path|pkg>` 安装后，dsh 启动时会
+# 自动加载这层 patch，把插件挂进 profile 的 cordis 树。
+#
+# 叠加顺序：dsh-base → 本 bundle patch → profile 的 cordis.patch.yml → --patch
+#
+# 配置项说明见 README.md。appId / appSecret 必填。
+
+- insert:
+    - id: yashiro
+      name: 'dsh-yashiro'
+      config:
+        # ↓↓↓ 这两个必填，改成你的机器人凭据 ↓↓↓
+        appId: ''
+        appSecret: ''
+        # 沙箱环境（未上线的机器人）填 true
+        sandbox: false
+        # agent 的工作目录；留空用进程 cwd
+        cwd: ''
+        # 群白名单，留空 = 机器人所在的群都服务
+        allowedGroups: []
+        # 群历史库路径；留空 = $DSH_HOME/storages/dsh-yashiro/history.db
+        historyDbPath: ''
+        historyDefaultLimit: 30
+        historyMaxLimit: 200
+        sendChunkLimit: 4500
+        announceNewMessageCount: true
+        debug: false
