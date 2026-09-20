@@ -145,20 +145,14 @@ dsh --profile yashiro
 
 ```
 你：@机器人 /id
-bot：群 ID（group_openid）：
-     A22459EFEB65CFF0405CB716510F7C57
-
-     你的 openid：
-     04929CA16A512F57CFBCC3AD77A5D640
-
-     昵称：Zhe_Learn
-
-     —
-     把群 ID 填到 allowedGroups 才会放行这个群（空 = 所有群都不放行）。
+bot：Group OpenID: A22459EFEB65CFF0405CB716510F7C57
+     User OpenID: 04929CA16A512F57CFBCC3AD77A5D640
+     Nick Name: Zhe_Learn
 ```
 
-单聊里发则回复「单聊 ID（user openid）… 把你的 openid 填到 allowedUsers 才会放行这个单聊」。
-回复文案只指向白名单，**不要**把自己的 openid 填进 `blockedSenders` —— 那是黑名单，等于把自己拦掉。
+回复只报这三个值、不带任何说明（说多了干扰复制）：群 ID 填 `allowedGroups`，
+单聊里对方的 openid 填 `allowedUsers`。单聊没有群，第一行给的就是这条会话的 id。
+昵称拿不到时 `Nick Name` 那行留空。
 
 - **需要 @ 机器人**（避免群里有人随口打出 `/id` 就触发）
 - **精确匹配**整条消息（去掉首尾空白后完全等于 `/id`），带参数不触发

@@ -74,30 +74,31 @@ describe('isIdCommand', () => {
 })
 
 describe('buildIdReply', () => {
-  it('群回复报出 group_openid 与 sender openid', () => {
+  it('群聊：三行，Group OpenID 是群 openid', () => {
     const reply = buildIdReply({ scope: 'group', peerId: GROUP, senderId: USER, senderName: 'Zhe_Learn' })
-    assert.ok(reply.includes(GROUP))
-    assert.ok(reply.includes(USER))
+    assert.deepEqual(reply.split('\n'), [
+      `Group OpenID: ${GROUP}`,
+      `User OpenID: ${USER}`,
+      'Nick Name: Zhe_Learn',
+    ])
   })
 
-  it('单聊回复报出 user openid', () => {
+  it('单聊：没有群，Group OpenID 给会话 id', () => {
     const reply = buildIdReply({ scope: 'c2c', peerId: USER, senderId: USER })
-    assert.ok(reply.includes(USER))
-    assert.ok(reply.includes('单聊'))
+    assert.deepEqual(reply.split('\n'), [
+      `Group OpenID: ${USER}`,
+      `User OpenID: ${USER}`,
+      'Nick Name: ',
+    ])
   })
 
-  it('指路指向白名单，绝不把人引到黑名单', () => {
-    const groupReply = buildIdReply({ scope: 'group', peerId: GROUP, senderId: USER })
-    assert.ok(groupReply.includes('allowedGroups'), groupReply)
-    assert.ok(!groupReply.includes('blockedSenders'), `回复不该让人填黑名单：${groupReply}`)
-
-    const c2cReply = buildIdReply({ scope: 'c2c', peerId: USER, senderId: USER })
-    assert.ok(c2cReply.includes('allowedUsers'), c2cReply)
-    assert.ok(!c2cReply.includes('blockedSenders'), `回复不该让人填黑名单：${c2cReply}`)
-  })
-
-  it('单聊回复不教人填 allowedGroups', () => {
-    const reply = buildIdReply({ scope: 'c2c', peerId: USER, senderId: USER })
-    assert.ok(!reply.includes('allowedGroups'), reply)
+  it('只有三行，不带任何说明文本', () => {
+    for (const scope of ['group', 'c2c']) {
+      const reply = buildIdReply({ scope, peerId: USER, senderId: USER, senderName: 'Zhe_Learn' })
+      assert.equal(reply.split('\n').length, 3, reply)
+      assert.ok(!reply.includes('allowedGroups'), reply)
+      assert.ok(!reply.includes('allowedUsers'), reply)
+      assert.ok(!reply.includes('blockedSenders'), reply)
+    }
   })
 })

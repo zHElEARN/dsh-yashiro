@@ -46,30 +46,20 @@ export function decideAccess(
   return { action: 'allow' }
 }
 
-/** `/id` 的回复文案：报出会话 id 和发送者 openid，并指明该填哪个配置项 */
+/**
+ * `/id` 的回复文案：只报三个 id，不带任何说明 —— 说多了会干扰复制。
+ *
+ * 群聊第一行给 group_openid，单聊没有群，第一行给会话 id（就是对方的 user openid）。
+ */
 export function buildIdReply(msg: {
   scope: ChatScope
   peerId: string
   senderId: string
   senderName?: string
 }): string {
-  const lines: string[] = []
-  if (msg.scope === 'group') {
-    lines.push('群 ID（group_openid）：', msg.peerId, '', '你的 openid：', msg.senderId)
-  } else {
-    lines.push('单聊 ID（user openid）：', msg.peerId, '', '你的 openid：', msg.senderId)
-  }
-  if (msg.senderName) {
-    lines.push('', `昵称：${msg.senderName}`)
-  }
-  lines.push('', '—')
-  if (msg.scope === 'group') {
-    lines.push('把群 ID 填到 allowedGroups 才会放行这个群（空 = 所有群都不放行）。')
-  } else {
-    lines.push(
-      '把你的 openid 填到 allowedUsers 才会放行这个单聊（空 = 所有单聊都不放行）。',
-      '群里的普通成员不需要任何配置，能配的只有群 ID。',
-    )
-  }
-  return lines.join('\n')
+  return [
+    `Group OpenID: ${msg.peerId}`,
+    `User OpenID: ${msg.senderId}`,
+    `Nick Name: ${msg.senderName ?? ''}`,
+  ].join('\n')
 }
