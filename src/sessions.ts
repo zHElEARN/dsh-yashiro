@@ -14,6 +14,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions, AgentSetup, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
+import type { ApprovalTarget } from './approval.js'
+
 /** 一条活跃会话：agent + 可选的拆除能力 */
 interface SessionEntry {
   agent: Agent
@@ -39,6 +41,8 @@ export function sessionIdOf(key: string): SessionId {
 
 export class SessionManager {
   private readonly sessions = new Map<string, SessionEntry>()
+  /** sessionId → 会话身份：审批通道按 `request.agent.id` 反查卡片该发到哪儿 */
+  private readonly targets = new Map<SessionId, ApprovalTarget>()
   /** 解析出来的 workspace：undefined = 还没找过，null = 找过但没有 */
   private workspaceEntity: WorkspaceLike | null | undefined
 
@@ -48,6 +52,11 @@ export class SessionManager {
     private readonly cwd: string | undefined,
     private readonly logger: { info(message: string): void; debug(message: string): void },
   ) {}
+
+  /** 按 sessionId 找本插件的会话；不是本插件的会话返回 undefined */
+  findTarget(sessionId: string): ApprovalTarget | undefined {
+    return this.targets.get(sessionId as SessionId)
+  }
 
   /**
    * 取这次的模型路由。
@@ -142,6 +151,7 @@ export class SessionManager {
     const live = this.ctx.agents.get(sessionId)
     if (live) {
       this.sessions.set(key, { agent: live, dispose: async () => {} })
+      this.targets.set(sessionId, { sessionKey: key, scope, peerId })
       await this.attachToWorkspace(sessionId)
       return live
     }
@@ -171,6 +181,7 @@ export class SessionManager {
 
     const created = handle
     this.sessions.set(key, { agent: created.agent, dispose: () => created.dispose() })
+    this.targets.set(sessionId, { sessionKey: key, scope, peerId })
     await this.attachToWorkspace(sessionId)
     return created.agent
   }
@@ -179,6 +190,7 @@ export class SessionManager {
   async disposeAll(): Promise<void> {
     const entries = [...this.sessions.values()]
     this.sessions.clear()
+    this.targets.clear()
     await Promise.all(entries.map((e) => e.dispose().catch(() => {})))
   }
 }

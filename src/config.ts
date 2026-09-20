@@ -52,6 +52,15 @@ export interface Config {
   /** 群聊 @ 时，附带告诉 agent「自你上次发言以来还有几条新消息」 */
   announceNewMessageCount: boolean
   /**
+   * 谁可以点审批卡片的「允许一次」（openid 白名单）。
+   * **空数组 = 群里任何人都能点**（和腾讯官方插件一致）。填了就同时收紧两处：
+   * 按钮在平台侧只对名单内的人可点（permission.type=0 + specify_user_ids），
+   * 点击回来还会在服务端再校验一次。
+   */
+  approvers: string[]
+  /** 审批卡片多久无人处理就按「拒绝」收场（秒） */
+  approvalTimeoutSeconds: number
+  /**
    * agent 正在跑回合时，新 @ 进来的消息怎么投递：
    * - `steer`（默认）插队 —— 在当前回合的下一个 step 边界就被看到，回复能带上这条新消息；
    * - `queue` 排队 —— 等当前回合结束，作为下一个回合的普通消息处理，第一条回复不受影响。
@@ -81,6 +90,8 @@ export const Config: Schema<Config> = Schema.object({
   historyMaxLimit: Schema.number().default(200),
   sendChunkLimit: Schema.number().default(4500),
   announceNewMessageCount: Schema.boolean().default(true),
+  approvers: Schema.array(Schema.string()).default([]),
+  approvalTimeoutSeconds: Schema.number().default(300),
   busyDelivery: Schema.union([Schema.const('steer'), Schema.const('queue')]).default('steer'),
   systemPrompt: Schema.string(),
   debug: Schema.boolean().default(false),

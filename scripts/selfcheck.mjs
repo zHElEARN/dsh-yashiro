@@ -4,6 +4,13 @@ import { formatTime, platformNowIso } from '../dist/time.js'
 import { buildIdReply, decideAccess, isIdCommand } from '../dist/access.js'
 import { buildUserText } from '../dist/message-text.js'
 import { Config } from '../dist/config.js'
+import {
+  buildApprovalKeyboard,
+  buildApprovalText,
+  commandOf,
+  decodeApprovalButton,
+  encodeApprovalButton,
+} from '../dist/approval.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rmSync } from 'node:fs'
@@ -211,6 +218,52 @@ check('busyDelivery 可切成排队', Config({ appId: 'x', appSecret: 'y', busyD
 check('busyDelivery 拒绝非法值', (() => {
   try { Config({ appId: 'x', appSecret: 'y', busyDelivery: 'nope' }); return false } catch { return true }
 })())
+
+console.log('— 审批通道（纯函数部分）—')
+{
+  const request = {
+    agent: {
+      id: 's1',
+      session: {
+        events: [
+          { type: 'tool/call', data: { callId: 'c1', arguments: JSON.stringify({ command: 'rm -rf /tmp/x', description: '清理' }) } },
+        ],
+      },
+    },
+    toolName: 'bash',
+    callId: 'c1',
+    reason: '需要写工作区外的文件',
+  }
+
+  check('button_data 往返', decodeApprovalButton(encodeApprovalButton('allow'))?.d === 'allow')
+  check('别的通道的 button_data 不认', decodeApprovalButton('{"t":"question","q":"x","i":0}') === undefined)
+  check('非 JSON 不认', decodeApprovalButton('nope') === undefined)
+
+  const buttons = buildApprovalKeyboard([]).content.rows[0].buttons
+  check('两个按钮', buttons.length === 2)
+  check('回调按钮 + 只能点一次', buttons.every((b) => b.action.type === 1 && b.action.click_limit === 1))
+  check('同一 group_id（点一个另一个变灰）', buttons[0].group_id === buttons[1].group_id)
+  check('approvers 为空 = 所有人可点', buttons[0].action.permission.type === 2)
+  const restricted = buildApprovalKeyboard(['04929CA16A512F57CFBCC3AD77A5D640']).content.rows[0].buttons[0]
+  check('指定审批人：type=0 + specify_user_ids',
+    restricted.action.permission.type === 0 &&
+    restricted.action.permission.specify_user_ids?.[0] === '04929CA16A512F57CFBCC3AD77A5D640')
+
+  check('命令回显（按 callId 倒查 tool/call）', commandOf(request) === 'rm -rf /tmp/x')
+  check('callId 对不上返回 undefined', commandOf({ ...request, callId: 'nope' }) === undefined)
+  const card = buildApprovalText(request, commandOf(request), 300_000)
+  check('卡片含工具名 / 命令 / 理由 / 超时',
+    card.includes('bash') && card.includes('rm -rf /tmp/x') &&
+    card.includes('需要写工作区外的文件') && card.includes('5 分钟'))
+
+  // rc.2 的 Session 没有 events 数组，只有 eventAt(seq) + seq。
+  // 之前照抄官方契约读 session.events.length，线上就是这么炸的 —— 这条是回归。
+  const toolCall = request.agent.session.events[0]
+  const rc2 = { ...request, agent: { id: 's1', session: { seq: 1, eventAt: (i) => (i === 0 ? toolCall : undefined) } } }
+  const naked = { ...request, agent: { id: 's1', session: {} } }
+  check('命令回显（rc.2：eventAt + seq）', commandOf(rc2) === 'rm -rf /tmp/x')
+  check('两种形状都读不到 → undefined 且不抛错', commandOf(naked) === undefined)
+}
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`)
 process.exit(fail === 0 ? 0 : 1)

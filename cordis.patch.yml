@@ -34,4 +34,8 @@
         announceNewMessageCount: true
         # 你正在跑回合时新 @ 进来的消息：steer = 插队（默认），queue = 排队等下一个回合
         busyDelivery: steer
+        # 谁能点审批卡片的「允许一次」；空 = 群里任何人都能点
+        approvers: []
+        # 审批卡片无人处理多少秒后按拒绝收场
+        approvalTimeoutSeconds: 300
         debug: false

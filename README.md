@@ -102,6 +102,8 @@ dsh --profile yashiro
 | `sendChunkLimit` | `4500` | 单条消息最大字符数，超出自动切分 |
 | `announceNewMessageCount` | `true` | @ 时附带「你不在时群里又聊了几条」 |
 | `busyDelivery` | `'steer'` | 它正在跑回合时新 @ 进来的消息：`steer` 插队（下个 step 就被看到）／`queue` 排队（等下一个回合） |
+| `approvers` | `[]` | 谁能点审批卡片的「允许一次」（openid 白名单）。**空 = 群里任何人都能点** |
+| `approvalTimeoutSeconds` | `300` | 审批卡片无人处理多久后按「拒绝」收场 |
 | `systemPrompt` | 内置 | 覆盖注入的系统提示词 |
 | `debug` | `false` | 打开后写 DEBUG 级文件日志 |
 
@@ -142,6 +144,25 @@ bot：群 ID（group_openid）：
 - **不经过 dsh** —— 插件直接回复，不消耗模型调用
 - 回复内容也会记入历史库
 
+## 审批（工作区外的操作）
+
+agent 在会话工作区之外动手时，dsh 的沙箱会先拒绝；模型随后按工具说明用
+`sandbox_permissions` + `justification` **重试一次**，这一次会走审批 —— 插件把它渲染成
+群里的一张卡片（工具名 + 被拦的命令 + 理由），带两个按钮：
+
+- **✅ 允许一次**：只有这一次放行（dsh 的审批 outcome 是闭合集合，没有 allow-always）
+- **❌ 拒绝**：这次调用被拒，模型收到 `the user rejected tool "…"`
+
+规则：
+
+- 按钮点击以 `INTERACTION_CREATE` 从 WebSocket 推回来，**不需要回调服务器**，也不必额外开通 intent。
+- `approvers` 为空 = **群里任何人都能点**（和腾讯官方插件一致）；填了就同时把按钮在平台侧
+  限给名单内的人（`permission.type=0` + `specify_user_ids`），点击回来还会再校验一次。
+- `approvalTimeoutSeconds`（默认 300）内没人点 → 按**拒绝**收场，并给群里补一条提示。
+- 卡片发不出去、那一轮被取消、插件卸载 → 一律 fail closed（`unavailable` / `cancelled`）。
+- 接法参考腾讯官方插件 [tencent-connect/dsh-qqbot](https://github.com/tencent-connect/dsh-qqbot)
+  的 `src/features/approval-channel.ts`（同一套 `approval/request` seam、同样的两按钮卡片）。
+
 ## 平台侧的坑（实测踩出来的）
 
 1. **全量模式下 @ 消息也叫 `GROUP_MESSAGE_CREATE`**，不是 `GROUP_AT_MESSAGE_CREATE`。
@@ -176,8 +197,8 @@ pnpm dump-session    # 打印本 workspace 最新一条会话的完整事件流
   就能天然支持「多会话切换」，不用改存储结构。
 - **黑名单只有 openid 一种维度**，没有白名单模式。被放行的群里，除黑名单外的人都能
   驱动一个**带 bash 权限**的完整 agent。
-- **审批无人应答**：headless profile 下 `approval/policy = ask` 但没有应答方，
-  需要审批的操作会 fail closed。要放开得自己做 QQ 侧按钮通道。
+- **审批只有「允许一次 / 拒绝」**，没有 allow-always（dsh 的审批 outcome 是闭合集合，
+  只有 `allowed-once` 是放行）；卡片超时（默认 5 分钟）按拒绝处理。
 - **插件不碰附件本体**。图片/语音/文件只把平台给的元信息（URL、类型、尺寸、语音转写）
   交给 agent，插件不下载、不持久化 —— 由 agent 自己决定何时 `curl` 下来再 `read_image`。
   QQ 的附件 URL 带时效，过期即放弃。

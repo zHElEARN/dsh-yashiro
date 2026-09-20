@@ -24,6 +24,7 @@ import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 import { buildIdReply, decideAccess, ID_COMMAND, isIdCommand } from './access.js'
+import { ApprovalChannel, type ApprovalContext } from './approval.js'
 import { Config } from './config.js'
 import { YashiroGateway } from './gateway.js'
 import { buildUserText } from './message-text.js'
@@ -90,7 +91,20 @@ export function apply(ctx: Context, config: Config): void {
 
   const sessions = new SessionManager(ctx, config.appId, config.cwd?.trim() || process.cwd(), logger)
 
-  const gateway = new YashiroGateway(
+  // 网关与审批通道互相引用（审批卡片经网关发出去，按钮点击由网关转给审批通道）。
+  // 先声明类型、后赋值，避免 TS 的类型推断绕成环。
+  let gateway: YashiroGateway
+
+  const approval = new ApprovalChannel({
+    appId: config.appId,
+    approvers: config.approvers,
+    timeoutMs: config.approvalTimeoutSeconds * 1000,
+    send: (target, text, keyboard) => gateway.sendCard(target.scope, target.peerId, text, keyboard),
+    findTarget: (sessionId) => sessions.findTarget(sessionId),
+    logger,
+  })
+
+  gateway = new YashiroGateway(
     config,
     {
       onMessage: (msg) => {
@@ -98,9 +112,11 @@ export function apply(ctx: Context, config: Config): void {
       },
       onReady: () => {},
       onError: () => {},
+      onInteraction: (event) => approval.handleInteraction(event),
     },
     logger,
   )
+  approval.install(ctx as unknown as ApprovalContext)
 
   /** 建立这个 QQ 会话专属的 agent 世界：两个工具 + 一段系统提示词 */
   function buildSetup(scope: 'group' | 'c2c', peerId: string): AgentSetup {
@@ -235,6 +251,7 @@ export function apply(ctx: Context, config: Config): void {
   // cordis 的生命周期钩子：effect 返回的函数在本插件 fiber 销毁时执行
   ctx.effect(() => () => {
     logger.info('[dsh-yashiro] 正在关闭…')
+    approval.cancelAll()
     gateway.stop()
     void sessions.disposeAll()
     store.close()

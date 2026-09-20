@@ -12,6 +12,7 @@
  */
 import { QQBot } from '@tencent-connect/qqbot-nodejs'
 import type { InboundMessage } from '@tencent-connect/qqbot-nodejs'
+import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs'
 import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol'
 
 import type { Config } from './config.js'
@@ -126,6 +127,11 @@ export interface GatewayHandlers {
   onMessage(msg: StoredMessage): void
   onReady(): void
   onError(err: unknown): void
+  /**
+   * 审批按钮被点击（INTERACTION_CREATE）。返回要回给平台的 ack code
+   * （0 成功 / 4 没权限）；返回 undefined 表示不是本插件的按钮。
+   */
+  onInteraction?(event: InteractionEvent): number | undefined
 }
 
 /** 薄封装：QQBot 生命周期 + 发送 */
@@ -184,6 +190,33 @@ export class YashiroGateway {
         logger.error(`[dsh-yashiro] 处理入站消息失败: ${stringify(err)}`)
       }
     })
+
+    // 审批按钮点击：INTERACTION_CREATE 经 WebSocket 推过来，不需要回调服务器。
+    // 必须回执，否则客户端按钮一直转圈；不是本插件的按钮回 3（重复操作）。
+    this.bot.on('interaction', (_ctx: unknown, event: InteractionEvent) => {
+      let code = 3
+      try {
+        code = handlers.onInteraction?.(event) ?? 3
+      } catch (err) {
+        logger.error(`[dsh-yashiro] 处理按钮点击失败: ${stringify(err)}`)
+      }
+      void this.bot.acknowledgeInteraction(event.id, code).catch((err: unknown) => {
+        logger.error(`[dsh-yashiro] 按钮点击回执失败: ${stringify(err)}`)
+      })
+    })
+  }
+
+  /**
+   * 发一条带内联键盘的 markdown（审批卡片用）。
+   * 走主动发送，不依赖 msg_id —— 审批可能落在被动回复窗口之外。
+   */
+  async sendCard(
+    scope: 'group' | 'c2c',
+    targetId: string,
+    text: string,
+    keyboard?: InlineKeyboard,
+  ): Promise<void> {
+    await this.bot.sendMarkdown({ scope, targetId }, text, keyboard === undefined ? undefined : { keyboard })
   }
 
   /**
