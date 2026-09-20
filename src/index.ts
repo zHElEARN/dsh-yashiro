@@ -16,11 +16,29 @@ import { SessionManager } from './agent/sessions.js'
 import { createAgentTools } from './agent/tools.js'
 import { Config } from './core/config.js'
 import { describeError } from './core/errors.js'
+import { formatTime } from './core/time.js'
 import { buildIdReply, decideAccess, ID_COMMAND, isIdCommand } from './qq/access.js'
 import { ApprovalChannel, type ApprovalContext } from './qq/approval.js'
 import { YashiroGateway } from './qq/gateway.js'
 import { buildUserText } from './qq/message-text.js'
-import { defaultHistoryDbPath, HistoryStore, type StoredMessage } from './store.js'
+import {
+  buildCurrentText,
+  buildListText,
+  buildNewSessionText,
+  buildSwitchErrorText,
+  buildSwitchOkText,
+  buildUsageText,
+  isSessionOperator,
+  matchSession,
+  NO_SESSION_TEXT,
+  parseSessionCommand,
+  SESSIONS_PER_PAGE,
+  shortSessionId,
+  type SessionCommand,
+  type SessionCommandContext,
+  type SessionLine,
+} from './qq/session-commands.js'
+import { defaultHistoryDbPath, HistoryStore, type SessionBinding, type StoredMessage } from './store.js'
 
 export const name = 'dsh-yashiro'
 
@@ -81,11 +99,11 @@ export function apply(ctx: Context, config: Config): void {
   let gateway: YashiroGateway
 
   const approval = new ApprovalChannel({
-    appId: config.appId,
     approvers: config.approvers,
     timeoutMs: config.approvalTimeoutSeconds * 1000,
     send: (target, text, keyboard) => gateway.sendCard(target.scope, target.peerId, text, keyboard),
     findTarget: (sessionId) => sessions.findTarget(sessionId),
+    currentSessionOf: (scope, peerId) => store.getCurrentSession(config.appId, scope, peerId)?.sessionId,
     logger,
   })
 
@@ -126,6 +144,123 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  /** 当前会话指针是持久化的，所以重启后 @ 还会落到同一条会话上 */
+  function currentOf(scope: 'group' | 'c2c', peerId: string): SessionBinding | undefined {
+    return store.getCurrentSession(config.appId, scope, peerId)
+  }
+
+  /** 把一个绑定行翻成展示用的会话行 */
+  function toLine(session: SessionBinding, current: SessionBinding | undefined): SessionLine {
+    return {
+      id: session.sessionId,
+      epoch: session.epoch,
+      updatedAt: session.updatedAt,
+      current: current?.sessionId === session.sessionId,
+    }
+  }
+
+  /** 这个群/单聊的全部会话，按最近使用倒序，标出哪条是当前 */
+  function sessionLines(scope: 'group' | 'c2c', peerId: string): SessionLine[] {
+    const current = currentOf(scope, peerId)
+    return store
+      .listSessions(config.appId, scope, peerId, 1, Number.MAX_SAFE_INTEGER)
+      .sessions.map((s) => toLine(s, current))
+  }
+
+  function sessionContext(scope: 'group' | 'c2c', peerId: string): SessionCommandContext {
+    const lines = sessionLines(scope, peerId)
+    const current = lines.find((line) => line.current)
+    return { ...(current ? { current } : {}), sessions: lines, total: lines.length, formatTime }
+  }
+
+  /**
+   * 会话指令的统一出口，调用方拿到 true 就结束这一条消息的处理。
+   *
+   * 这些指令会改「这个群正在用哪条会话」，所以限审批名单 —— 否则群里任何人都能
+   * 把会话换成自己的。被拒时明确回一句，不静默丢弃。
+   */
+  async function handleSessionCommand(msg: StoredMessage, command: SessionCommand): Promise<true> {
+    const scope = msg.scope
+    const peerId = msg.peerId
+
+    if (!isSessionOperator(msg.senderId, config.approvers)) {
+      logger.info(`[dsh-yashiro] 会话指令被非名单内的人触发：${msg.senderId}`)
+      await reply('只有审批名单里的人能用会话指令。')
+      return true
+    }
+
+    if (command.kind === 'usage') {
+      await reply(buildUsageText(command.command))
+      return true
+    }
+
+    if (command.kind === 'current') {
+      await reply(buildCurrentText(sessionContext(scope, peerId)))
+      return true
+    }
+
+    if (command.kind === 'list') {
+      const lines = sessionLines(scope, peerId)
+      const start = (command.page - 1) * SESSIONS_PER_PAGE
+      const current = lines.find((line) => line.current)
+      await reply(
+        buildListText(
+          {
+            ...(current ? { current } : {}),
+            sessions: lines.slice(start, start + SESSIONS_PER_PAGE),
+            total: lines.length,
+            formatTime,
+          },
+          command.page,
+        ),
+      )
+      return true
+    }
+
+    if (command.kind === 'new') {
+      const epoch = store.nextEpoch(config.appId, scope, peerId)
+      try {
+        // 先建会话再落绑定：建失败就什么都不落，当前会话与绑定保持原样
+        const agent = await sessions.create(scope, peerId, epoch, buildSetup(scope, peerId))
+        const binding = store.createSession(config.appId, scope, peerId, String(agent.id))
+        logger.info(`[dsh-yashiro] 已新建会话：${shortSessionId(String(agent.id))} peer=${peerId}`)
+        await reply(buildNewSessionText(toLine(binding, binding), formatTime))
+      } catch (err) {
+        logger.error(`[dsh-yashiro] 新建会话失败: ${describeError(err)}`)
+        await reply('新建会话失败，当前会话没有变化。详情见插件日志。')
+      }
+      return true
+    }
+
+    // /switch：只认自己这个群里的会话；唯一才切，不猜
+    const lines = sessionLines(scope, peerId)
+    const matches = matchSession(command.id, lines)
+    const target = matches.length === 1 ? matches[0] : undefined
+    if (target === undefined) {
+      await reply(buildSwitchErrorText(command.id, matches))
+      return true
+    }
+
+    const agent = await sessions.select(scope, peerId, target.id, buildSetup(scope, peerId))
+    if (agent === undefined) {
+      await reply(`会话 ${shortSessionId(target.id)} 连不上（会话文件可能被删了），当前会话没有变化。`)
+      return true
+    }
+    store.setCurrentSession(config.appId, scope, peerId, target.epoch)
+    logger.info(`[dsh-yashiro] 已切换会话：${shortSessionId(target.id)} peer=${peerId}`)
+    await reply(buildSwitchOkText(target, formatTime))
+    return true
+
+    async function reply(text: string): Promise<void> {
+      try {
+        await gateway.send(scope, peerId, text)
+        recordOutbound(scope, peerId, text)
+      } catch (err) {
+        logger.error(`[dsh-yashiro] 发送会话指令回复失败: ${describeError(err)}`)
+      }
+    }
+  }
+
   async function handleMessage(msg: StoredMessage): Promise<void> {
     // 入库先于访问控制：白名单只决定「要不要唤醒 agent」，不决定「要不要记录」
     try {
@@ -163,7 +298,26 @@ export function apply(ctx: Context, config: Config): void {
       return
     }
 
-    const dedupeKey = `${msg.scope}:${msg.peerId}`
+    const sessionCommand = parseSessionCommand(msg.content)
+    if (sessionCommand !== undefined) {
+      await handleSessionCommand(msg, sessionCommand)
+      return
+    }
+
+    // 没有会话就不建：明确让用户 /new，避免一个 @ 就悄悄开出一条空会话
+    const current = currentOf(msg.scope, msg.peerId)
+    if (current === undefined) {
+      logger.info(`[dsh-yashiro] 无会话，已提示 ${msg.scope} ${msg.peerId} 用 /new`)
+      try {
+        await gateway.send(msg.scope, msg.peerId, NO_SESSION_TEXT)
+      } catch (err) {
+        logger.error(`[dsh-yashiro] 发送「无会话」提示失败: ${describeError(err)}`)
+      }
+      return
+    }
+
+    // 去重与「上次开口」都按会话记：/new 之后是全新上下文，不该继承旧会话的状态
+    const dedupeKey = current.sessionId
     let seen = seenMessages.get(dedupeKey)
     if (!seen) {
       seen = new Set()
@@ -188,8 +342,22 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     try {
-      logger.debug(`[trace] 准备建立/复用会话 peer=${msg.peerId}`)
-      const agent = await sessions.getOrCreate(msg.scope, msg.peerId, buildSetup(msg.scope, msg.peerId))
+      logger.debug(`[trace] 准备连到会话 session=${shortSessionId(current.sessionId)} peer=${msg.peerId}`)
+      const agent = await sessions.select(
+        msg.scope,
+        msg.peerId,
+        current.sessionId,
+        buildSetup(msg.scope, msg.peerId),
+      )
+      if (agent === undefined) {
+        logger.error(`[dsh-yashiro] 会话连不上：${shortSessionId(current.sessionId)}`)
+        await gateway.send(
+          msg.scope,
+          msg.peerId,
+          `当前会话（${shortSessionId(current.sessionId)}）连不上，用 /new 或 /switch 换一条。`,
+        )
+        return
+      }
       logger.debug(`[trace] 会话就绪 session=${String(agent.id)}，准备投递`)
       const message = createUserMessage({
         content: [{ type: 'text', text: buildUserText(msg, { newSinceLastWake }) }],
@@ -199,6 +367,7 @@ export function apply(ctx: Context, config: Config): void {
       if (config.busyDelivery === 'queue') agent.followup(message)
       else agent.steer(message)
       logger.debug(`[trace] ${config.busyDelivery} 已提交`)
+      store.touchSession(config.appId, msg.scope, msg.peerId, current.epoch)
       lastWakeAt.set(dedupeKey, Date.parse(msg.timestamp) || Date.now())
       logger.info(
         `[dsh-yashiro] 已唤醒 agent：session=${String(agent.id).slice(0, 12)}… peer=${msg.peerId}`,

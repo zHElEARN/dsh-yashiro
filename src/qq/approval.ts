@@ -7,8 +7,6 @@
  */
 import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs'
 
-import { sessionKeyOf } from '../agent/sessions.js'
-
 // ── 最小契约（结构化对齐 dsh-user-approval，但不硬依赖那个包） ──
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
@@ -42,9 +40,8 @@ export interface ApprovalRequest {
   signal?: AbortSignal
 }
 
-/** 发卡片要知道发到哪；pending 以 sessionKey 为键 */
+/** 发卡片要知道发到哪 */
 export interface ApprovalTarget {
-  sessionKey: string
   scope: 'group' | 'c2c'
   peerId: string
 }
@@ -185,7 +182,9 @@ export function buildApprovalKeyboard(approvers: readonly string[]): InlineKeybo
 
 // ── 通道 ──
 
+/** pending 以 sessionId 为键：一个群可能有多条会话，按群查会串到别的会话上 */
 interface PendingApproval {
+  sessionId: string
   target: ApprovalTarget
   resolve: (outcome: ApprovalOutcome) => void
   timer: ReturnType<typeof setTimeout>
@@ -196,8 +195,6 @@ interface PendingApproval {
 const DEFAULT_TIMEOUT_MS = 300_000
 
 export interface ApprovalChannelDeps {
-  /** sessionKey 由它派生 */
-  appId: string
   /** 空数组 = 群里任何人都能点 */
   approvers?: readonly string[]
   /** 多久无人处理按拒绝收场（毫秒），缺省 5 分钟 */
@@ -205,6 +202,8 @@ export interface ApprovalChannelDeps {
   send: ApprovalSender
   /** 不是本插件的会话返回 undefined，交回链上其他应答者 */
   findTarget(sessionId: string): ApprovalTarget | undefined
+  /** 这个群/单聊当前用的是哪条会话；没有会话时 undefined */
+  currentSessionOf(scope: 'group' | 'c2c', peerId: string): string | undefined
   logger: ApprovalLogger
 }
 
@@ -252,8 +251,11 @@ export class ApprovalChannel {
     const scope: 'group' | 'c2c' = event.scene === 'group' ? 'group' : 'c2c'
     const peerId = scope === 'group' ? (event.group_openid ?? '') : (event.user_openid ?? '')
     if (peerId === '') return undefined
-    const sessionKey = sessionKeyOf(this.deps.appId, scope, peerId)
-    const entry = this.pending.get(sessionKey)
+
+    // 一个群可能有多条会话，但待审批的只会是「这个群当前正在用的那条」
+    const sessionId = this.deps.currentSessionOf(scope, peerId)
+    if (sessionId === undefined) return undefined
+    const entry = this.pending.get(sessionId)
     if (entry === undefined) return undefined
 
     const clicker = scope === 'group' ? (event.group_member_openid ?? event.user_openid) : event.user_openid
@@ -265,7 +267,7 @@ export class ApprovalChannel {
     this.deps.logger.info(
       `[dsh-yashiro] 审批${button.d === 'allow' ? '允许' : '拒绝'}：${entry.target.scope} ${entry.target.peerId}`,
     )
-    this.settle(sessionKey, button.d === 'allow' ? 'allowed-once' : 'rejected')
+    this.settle(entry.sessionId, button.d === 'allow' ? 'allowed-once' : 'rejected')
     return 0
   }
 
@@ -281,11 +283,15 @@ export class ApprovalChannel {
   ): Promise<ApprovalOutcome> {
     const target = this.deps.findTarget(request.agent.id)
     if (target === undefined) return next()
-    return this.park(target, request)
+    return this.park(request.agent.id, target, request)
   }
 
-  private async park(target: ApprovalTarget, request: ApprovalRequest): Promise<ApprovalOutcome> {
-    const key = target.sessionKey
+  private async park(
+    sessionId: string,
+    target: ApprovalTarget,
+    request: ApprovalRequest,
+  ): Promise<ApprovalOutcome> {
+    const key = sessionId
     if (request.signal?.aborted) return 'cancelled'
     if (this.pending.has(key)) {
       this.deps.logger.warn(`[dsh-yashiro] 该会话已有待审批请求，这一条按不可用处理：${key}`)
@@ -306,6 +312,7 @@ export class ApprovalChannel {
 
     return await new Promise<ApprovalOutcome>((resolve) => {
       const entry: PendingApproval = {
+        sessionId,
         target,
         resolve,
         timer: setTimeout(() => {

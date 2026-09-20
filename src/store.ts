@@ -74,6 +74,21 @@ export interface SearchOptions {
   order?: 'asc' | 'desc'
 }
 
+/** 一条会话绑定：QQ 会话内第 epoch 条 dsh 会话 */
+export interface SessionBinding {
+  /** 该 QQ 会话内的自增序号，参与 SessionId 派生 */
+  epoch: number
+  sessionId: string
+  createdAt: number
+  /** 最近一次投递的时间，列表按它倒序 */
+  updatedAt: number
+}
+
+export interface SessionPage {
+  sessions: SessionBinding[]
+  total: number
+}
+
 /** 默认落在 $DSH_HOME/storages/dsh-yashiro/history.db */
 export function defaultHistoryDbPath(): string {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
@@ -84,6 +99,21 @@ export class HistoryStore {
   private readonly db: DatabaseSync
   /** 插件日志会写到同目录下 */
   readonly path: string
+  /** 见 now() —— 保证绑定表的时间戳严格递增 */
+  private lastStamp = 0
+
+  /**
+   * 单调递增的毫秒时间戳。
+   *
+   * 列表是按 updated_at 倒序排的，而 Date.now() 只有毫秒精度：同一毫秒里 touch 两条
+   * 会拿到相同的时间戳，排序就变成随机的。这里保证每次调用都比上一次大（至少 +1ms，
+   * 只是排序用的逻辑时钟）。
+   */
+  private now(): number {
+    const ms = Date.now()
+    this.lastStamp = ms > this.lastStamp ? ms : this.lastStamp + 1
+    return this.lastStamp
+  }
 
   constructor(path: string) {
     this.path = path
@@ -110,6 +140,19 @@ export class HistoryStore {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msgid ON messages(app_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_messages_peer_ts ON messages(app_id, peer_id, ts);
+
+      CREATE TABLE IF NOT EXISTS session_bindings (
+        app_id      TEXT    NOT NULL,
+        scope       TEXT    NOT NULL,
+        peer_id     TEXT    NOT NULL,
+        epoch       INTEGER NOT NULL,
+        session_id  TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        is_current  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (app_id, scope, peer_id, epoch)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bindings_current ON session_bindings(app_id, scope, peer_id, is_current);
     `)
   }
 
@@ -159,6 +202,120 @@ export class HistoryStore {
       rawEventType: 'OUTBOUND',
       timestamp: platformNowIso(),
     })
+  }
+
+  // ── 会话绑定：一个 QQ 会话（群/单聊）可以有多条 dsh 会话，其中一条是 current ──
+
+  /** 当前会话；这个群/单聊还没建过任何会话时返回 undefined */
+  getCurrentSession(appId: string, scope: 'group' | 'c2c', peerId: string): SessionBinding | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT app_id, scope, peer_id, epoch, session_id, created_at, updated_at
+           FROM session_bindings
+          WHERE app_id = ? AND scope = ? AND peer_id = ? AND is_current = 1`,
+      )
+      .get(appId, scope, peerId)
+    return row === undefined ? undefined : toSessionBinding(row)
+  }
+
+  /**
+   * 下一个可用的 epoch。
+   *
+   * 是 `MAX(epoch) + 1` 而不是「会话条数 + 1」：会话万一被删掉一条，条数就会跟已有的
+   * epoch 撞上，派生出的 SessionId 会指向别的会话。
+   */
+  nextEpoch(appId: string, scope: 'group' | 'c2c', peerId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(epoch), 0) AS max_epoch
+           FROM session_bindings WHERE app_id = ? AND scope = ? AND peer_id = ?`,
+      )
+      .get(appId, scope, peerId) as { max_epoch: number } | undefined
+    return Number(row?.max_epoch ?? 0) + 1
+  }
+
+  /** 新建一条会话（epoch 取当前最大值 +1）并切成 current，返回新绑定 */
+  createSession(
+    appId: string,
+    scope: 'group' | 'c2c',
+    peerId: string,
+    sessionId: string,
+  ): SessionBinding {
+    const epoch = this.nextEpoch(appId, scope, peerId)
+    const now = this.now()
+
+    this.db
+      .prepare(
+        `INSERT INTO session_bindings
+           (app_id, scope, peer_id, epoch, session_id, created_at, updated_at, is_current)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+      )
+      .run(appId, scope, peerId, epoch, sessionId, now, now)
+
+    this.setCurrentSession(appId, scope, peerId, epoch)
+    return { epoch, sessionId, createdAt: now, updatedAt: now }
+  }
+
+  /**
+   * 切换 current。先确认目标存在再清旧标记 —— 否则目标不存在时会把现有指针一起清掉，
+   * 群的当前会话变成「无」，@ 就不再回应了。
+   */
+  setCurrentSession(appId: string, scope: 'group' | 'c2c', peerId: string, epoch: number): boolean {
+    const exists = this.db
+      .prepare(
+        'SELECT 1 AS ok FROM session_bindings WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?',
+      )
+      .get(appId, scope, peerId, epoch)
+    if (exists === undefined) return false
+
+    this.db
+      .prepare(
+        'UPDATE session_bindings SET is_current = 0 WHERE app_id = ? AND scope = ? AND peer_id = ?',
+      )
+      .run(appId, scope, peerId)
+    this.db
+      .prepare(
+        `UPDATE session_bindings SET is_current = 1, updated_at = ?
+          WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?`,
+      )
+      .run(this.now(), appId, scope, peerId, epoch)
+    return true
+  }
+
+  /** 刷新「最近使用」；列表就是按它倒序排的，每次投递后都要调 */
+  touchSession(appId: string, scope: 'group' | 'c2c', peerId: string, epoch: number): void {
+    this.db
+      .prepare(
+        `UPDATE session_bindings SET updated_at = ?
+          WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?`,
+      )
+      .run(this.now(), appId, scope, peerId, epoch)
+  }
+
+  /** 某个群/单聊的全部会话，按最近使用倒序；page 从 1 开始 */
+  listSessions(
+    appId: string,
+    scope: 'group' | 'c2c',
+    peerId: string,
+    page: number,
+    perPage: number,
+  ): SessionPage {
+    const where = 'app_id = ? AND scope = ? AND peer_id = ?'
+    const countRow = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM session_bindings WHERE ${where}`)
+      .get(appId, scope, peerId) as { n: number } | undefined
+
+    const rows = this.db
+      .prepare(
+        `SELECT app_id, scope, peer_id, epoch, session_id, created_at, updated_at
+           FROM session_bindings
+          WHERE ${where}
+          ORDER BY updated_at DESC, epoch DESC
+          LIMIT ? OFFSET ?`,
+      )
+      .all(appId, scope, peerId, perPage, (page - 1) * perPage)
+
+    return { sessions: rows.map(toSessionBinding), total: Number(countRow?.n ?? 0) }
   }
 
   search(opts: SearchOptions): HistoryRow[] {
@@ -248,6 +405,15 @@ export class HistoryStore {
     } catch {
       /* 已被关闭 */
     }
+  }
+}
+
+function toSessionBinding(row: Record<string, unknown>): SessionBinding {
+  return {
+    epoch: Number(row.epoch),
+    sessionId: String(row.session_id),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
   }
 }
 

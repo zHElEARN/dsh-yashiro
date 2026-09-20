@@ -91,3 +91,61 @@ describe('HistoryStore.appendOutbound', () => {
     assert.equal(last?.mentionsBot, false)
   })
 })
+
+describe('HistoryStore 会话绑定', () => {
+  const APP = '1905501006'
+  const PEER = 'BIND-G1'
+  const OTHER = 'BIND-G2'
+
+  it('还没建过会话时没有当前会话', () => {
+    assert.equal(store.getCurrentSession(APP, 'group', PEER), undefined)
+  })
+
+  it('新建即成为当前，epoch 从 1 递增', () => {
+    const first = store.createSession(APP, 'group', PEER, 'sid-1')
+    assert.equal(first.epoch, 1)
+    assert.equal(store.getCurrentSession(APP, 'group', PEER)?.sessionId, 'sid-1')
+
+    const second = store.createSession(APP, 'group', PEER, 'sid-2')
+    assert.equal(second.epoch, 2)
+    assert.equal(store.getCurrentSession(APP, 'group', PEER)?.sessionId, 'sid-2')
+  })
+
+  it('切回旧会话后当前会话跟着变', () => {
+    assert.equal(store.setCurrentSession(APP, 'group', PEER, 1), true)
+    assert.equal(store.getCurrentSession(APP, 'group', PEER)?.sessionId, 'sid-1')
+  })
+
+  it('切到不存在的 epoch 返回 false，当前会话不动', () => {
+    assert.equal(store.setCurrentSession(APP, 'group', PEER, 99), false)
+    assert.equal(store.getCurrentSession(APP, 'group', PEER)?.sessionId, 'sid-1')
+  })
+
+  it('会话按最近使用倒序，touch 能把一条顶上来', () => {
+    store.touchSession(APP, 'group', PEER, 2)
+    assert.deepEqual(
+      store.listSessions(APP, 'group', PEER, 1, 10).sessions.map((s) => s.sessionId),
+      ['sid-2', 'sid-1'],
+    )
+    store.touchSession(APP, 'group', PEER, 1)
+    assert.deepEqual(
+      store.listSessions(APP, 'group', PEER, 1, 10).sessions.map((s) => s.sessionId),
+      ['sid-1', 'sid-2'],
+    )
+  })
+
+  it('分页与总数', () => {
+    const page1 = store.listSessions(APP, 'group', PEER, 1, 1)
+    assert.equal(page1.sessions.length, 1)
+    assert.equal(page1.total, 2)
+    const page2 = store.listSessions(APP, 'group', PEER, 2, 1)
+    assert.equal(page2.sessions.length, 1)
+    assert.notEqual(page2.sessions[0].sessionId, page1.sessions[0].sessionId)
+    assert.equal(page2.total, 2)
+  })
+
+  it('会话按群隔离，别的群看不到', () => {
+    assert.equal(store.getCurrentSession(APP, 'group', OTHER), undefined)
+    assert.equal(store.listSessions(APP, 'group', OTHER, 1, 10).total, 0)
+  })
+})

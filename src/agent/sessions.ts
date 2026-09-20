@@ -28,9 +28,17 @@ interface WorkspaceRegistryLike {
   resolveByPath(path: string): Promise<WorkspaceLike | undefined>
 }
 
-/** 这个格式是跨模块契约：审批通道靠它把按钮点击映射回会话，改了两边必须一起改 */
-export function sessionKeyOf(appId: string, scope: 'group' | 'c2c', peerId: string): string {
-  return `yashiro:${appId}:${scope}:${peerId}`
+/**
+ * 同一个 QQ 会话里第 epoch 条 dsh 会话的 key。epoch 由绑定表分配，所以同一个 epoch
+ * 永远派生出同一个 SessionId —— 重启后能 resume 回同一条，不需要额外映射。
+ */
+export function sessionKeyOf(
+  appId: string,
+  scope: 'group' | 'c2c',
+  peerId: string,
+  epoch: number,
+): string {
+  return `yashiro:${appId}:${scope}:${peerId}:${epoch}`
 }
 
 export function sessionIdOf(key: string): SessionId {
@@ -38,7 +46,8 @@ export function sessionIdOf(key: string): SessionId {
 }
 
 export class SessionManager {
-  private readonly sessions = new Map<string, SessionEntry>()
+  /** 只放内存里活着的 agent；SessionId 是它的唯一标识 */
+  private readonly sessions = new Map<SessionId, SessionEntry>()
   /** sessionId → 会话身份：审批通道按 `request.agent.id` 反查卡片该发到哪儿 */
   private readonly targets = new Map<SessionId, ApprovalTarget>()
   /** 解析出来的 workspace：undefined = 还没找过，null = 找过但没有 */
@@ -118,58 +127,82 @@ export class SessionManager {
     }
   }
 
-  async getOrCreate(
+  /**
+   * 新建这个 QQ 会话的第 epoch 条 dsh 会话；epoch 由调用方从绑定表取，保证确定性派生。
+   * 建不出来会抛错，调用方据此决定要不要落绑定 —— 先有会话再有绑定，不会留下悬空指针。
+   */
+  async create(
     scope: 'group' | 'c2c',
     peerId: string,
+    epoch: number,
     setup: AgentSetup,
   ): Promise<Agent> {
-    const key = sessionKeyOf(this.appId, scope, peerId)
-    const sessionId = sessionIdOf(key)
+    const sessionId = sessionIdOf(sessionKeyOf(this.appId, scope, peerId, epoch))
+    const agentOptions = this.resolveAgentOptions()
+    const handle = await this.ctx.agents.create({
+      sessionId,
+      ...(this.cwd ? { meta: { cwd: this.cwd } } : {}),
+      ...(agentOptions ? { agentOptions } : {}),
+      setup,
+    })
+    this.remember(sessionId, handle, scope, peerId)
+    await this.attachToWorkspace(sessionId)
+    return handle.agent
+  }
 
-    const cached = this.sessions.get(key)
+  /**
+   * 连到一条已经存在的会话；它只可能在磁盘上，因为在内存里没有。
+   *
+   * 连不上就返回 undefined（调用方回复「连不上」），**不会**退化成新建 ——
+   * 否则会话文件被删掉之后，这里会悄悄给出一条空会话，看起来像切换成功了。
+   */
+  async select(
+    scope: 'group' | 'c2c',
+    peerId: string,
+    sessionId: string,
+    setup: AgentSetup,
+  ): Promise<Agent | undefined> {
+    const id = sessionId as SessionId
+
+    const cached = this.sessions.get(id)
     if (cached) {
-      await this.attachToWorkspace(sessionId)
+      await this.attachToWorkspace(id)
       return cached.agent
     }
 
-    const agentOptions = this.resolveAgentOptions()
-
     // 已经在 live registry 里（例如插件热重载后），复用即可 —— 但没有拆除权
-    const live = this.ctx.agents.get(sessionId)
+    const live = this.ctx.agents.get(id)
     if (live) {
-      this.sessions.set(key, { agent: live, dispose: async () => {} })
-      this.targets.set(sessionId, { sessionKey: key, scope, peerId })
-      await this.attachToWorkspace(sessionId)
+      this.remember(id, { agent: live, dispose: async () => {} }, scope, peerId)
+      await this.attachToWorkspace(id)
       return live
     }
 
-    // 磁盘上有历史会话就 resume；没有（或 resume 失败）再新建
-    let handle: AgentHandle | undefined
+    const agentOptions = this.resolveAgentOptions()
     try {
-      handle = await this.ctx.agents.resume({
-        resumeSessionId: sessionId,
+      const handle = await this.ctx.agents.resume({
+        resumeSessionId: id,
         ...(this.cwd ? { meta: { cwd: this.cwd } } : {}),
         ...(agentOptions ? { agentOptions } : {}),
         setup,
       })
-    } catch {
-      handle = undefined
+      this.remember(id, handle, scope, peerId)
+      await this.attachToWorkspace(id)
+      return handle.agent
+    } catch (err) {
+      this.logger.info(`[dsh-yashiro] 会话连不上（不回退成新建）：${describeError(err)}`)
+      return undefined
     }
+  }
 
-    if (!handle) {
-      handle = await this.ctx.agents.create({
-        sessionId,
-        ...(this.cwd ? { meta: { cwd: this.cwd } } : {}),
-        ...(agentOptions ? { agentOptions } : {}),
-        setup,
-      })
-    }
-
-    const created = handle
-    this.sessions.set(key, { agent: created.agent, dispose: () => created.dispose() })
-    this.targets.set(sessionId, { sessionKey: key, scope, peerId })
-    await this.attachToWorkspace(sessionId)
-    return created.agent
+  private remember(
+    sessionId: SessionId,
+    handle: AgentHandle,
+    scope: 'group' | 'c2c',
+    peerId: string,
+  ): void {
+    this.sessions.set(sessionId, { agent: handle.agent, dispose: () => handle.dispose() })
+    this.targets.set(sessionId, { scope, peerId })
   }
 
   /** 拆除全部会话（插件卸载时调用） */
