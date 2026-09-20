@@ -42,8 +42,12 @@ import { defaultHistoryDbPath, HistoryStore, type SessionBinding, type StoredMes
 
 export const name = 'dsh-yashiro'
 
-/** 依赖的 cordis 服务：agent 注册表、默认模型、工具注册表、系统提示词注册表 */
-export const inject = ['agents', 'agentDefaultModel', 'tools', 'systemPrompt']
+/**
+ * 依赖的 cordis 服务：agent 注册表、默认模型、工具与系统提示词注册表、会话标题。
+ *
+ * sessionTitle 由 dsh-base 提供，所以实际上一定在；列进来是为了拿到类型。
+ */
+export const inject = ['agents', 'agentDefaultModel', 'tools', 'systemPrompt', 'sessionTitle']
 
 export { Config }
 export type { Config as YashiroConfig } from './core/config.js'
@@ -52,6 +56,17 @@ const PLUGIN_ID = 'dsh-yashiro'
 
 /** 每个会话记住多少条已处理的消息 ID；超出就丢最早的 */
 const DEDUPE_WINDOW = 200
+
+/** ctx.sessionTitle（@deepseek-ai/dsh-session-title）里用到的最小面 */
+interface SessionTitleServiceLike {
+  rename(session: unknown, title: string): unknown
+}
+
+/** Agent 上标题需要用到的那两个字段 */
+interface AgentLike {
+  id: unknown
+  session: unknown
+}
 
 export function apply(ctx: Context, config: Config): void {
   const store = new HistoryStore(config.historyDbPath?.trim() || defaultHistoryDbPath())
@@ -222,6 +237,7 @@ export function apply(ctx: Context, config: Config): void {
       try {
         // 先建会话再落绑定：建失败就什么都不落，当前会话与绑定保持原样
         const agent = await sessions.create(scope, peerId, epoch, buildSetup(scope, peerId))
+        titleSession(agent)
         const binding = store.createSession(config.appId, scope, peerId, String(agent.id))
         logger.info(`[dsh-yashiro] 已新建会话：${shortSessionId(String(agent.id))} peer=${peerId}`)
         await reply(buildNewSessionText(toLine(binding, binding), formatTime))
@@ -246,6 +262,7 @@ export function apply(ctx: Context, config: Config): void {
       await reply(`会话 ${shortSessionId(target.id)} 连不上（会话文件可能被删了），当前会话没有变化。`)
       return true
     }
+    titleSession(agent)
     store.setCurrentSession(config.appId, scope, peerId, target.epoch)
     logger.info(`[dsh-yashiro] 已切换会话：${shortSessionId(target.id)} peer=${peerId}`)
     await reply(buildSwitchOkText(target, formatTime))
@@ -258,6 +275,28 @@ export function apply(ctx: Context, config: Config): void {
       } catch (err) {
         logger.error(`[dsh-yashiro] 发送会话指令回复失败: ${describeError(err)}`)
       }
+    }
+  }
+
+  /**
+   * 给会话起个名字，让它在 web 侧边栏里认得出是哪条。
+   *
+   * 用 8 位短 ID，和群里 /list、/current 显示的是同一个值。不设的话侧边栏会退回
+   * 工作目录名（所有会话都长一样）。
+   *
+   * rename 写入的标题 source 是 `user`，这个标记会连带禁掉首条消息触发的 LLM 自动
+   * 标题 —— 否则我们设的名字会在 agent 第一次回话时被顶掉。
+   */
+  function titleSession(agent: AgentLike): void {
+    const titles = ctx.get('sessionTitle') as SessionTitleServiceLike | undefined
+    if (titles === undefined) {
+      logger.debug('[dsh-yashiro] 没有 sessionTitle 服务，跳过设置会话标题')
+      return
+    }
+    try {
+      titles.rename(agent.session, shortSessionId(String(agent.id)))
+    } catch (err) {
+      logger.warn(`[dsh-yashiro] 设置会话标题失败（不影响对话）：${describeError(err)}`)
     }
   }
 
