@@ -130,7 +130,7 @@ export function createSendTool(deps: ToolDeps) {
   const { gateway, store, config, scope, peerId } = deps
   return defineTool({
     name: 'qqbot_send',
-    description: '把一条消息发送到当前 QQ 群或单聊。',
+    description: '把一条消息发送到当前 QQ 群或单聊，内容按 markdown 渲染。',
     parameters: {
       text: {
         type: 'string',

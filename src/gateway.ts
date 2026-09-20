@@ -149,7 +149,7 @@ export class YashiroGateway {
       appSecret: config.appSecret,
       baseUrl: config.sandbox ? SANDBOX_BASE_URL : undefined,
       intents: FULL_INTENTS | GROUP_MESSAGE_INTENT,
-      markdownSupport: false,
+      markdownSupport: true,
       logger: {
         debug: (m?: unknown) => log(`[qqbot:debug] ${stringify(m)}`),
         info: (m?: unknown) => log(`[qqbot] ${stringify(m)}`),
