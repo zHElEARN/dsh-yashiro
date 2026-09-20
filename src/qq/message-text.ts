@@ -1,14 +1,10 @@
 /**
  * 把一条入站消息拼成送给 agent 的正文。
  *
- * 抽成独立模块是为了可测 —— 之前这段逻辑内联在 apply() 里，
- * 「引用的图片附件没传下去」这个 bug 就是因为没人覆盖到它。
- *
- * 设计原则：**附件只搬运平台的元信息（URL、类型、尺寸、语音转写），插件不下载、
- * 不持久化**。什么时候下、要不要下，全由 agent 自己决定；QQ 的 URL 带时效，
- * 过期了就算了。
+ * 附件只搬平台的元信息（URL、类型、尺寸、语音转写），插件不下载也不持久化：
+ * 下不下、什么时候下由 agent 自己决定，QQ 的 URL 带时效，过期就算了。
  */
-import type { AttachmentInfo, StoredMessage } from './store.js'
+import type { AttachmentInfo, StoredMessage } from '../store.js'
 
 const CONTENT_TYPE_LABELS: Array<[RegExp, string]> = [
   [/^image\//, '图片'],
@@ -18,7 +14,6 @@ const CONTENT_TYPE_LABELS: Array<[RegExp, string]> = [
   [/^file$/, '文件'],
 ]
 
-/** 把 MIME 类型翻成人话 */
 export function attachmentKindLabel(contentType: string): string {
   for (const [pattern, label] of CONTENT_TYPE_LABELS) {
     if (pattern.test(contentType)) return label
@@ -26,14 +21,12 @@ export function attachmentKindLabel(contentType: string): string {
   return '附件'
 }
 
-/** 字节数 → 人话 */
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`
 }
 
-/** 一行附件描述，如 `图片 cat.jpg 1206x2622 1.3MB` */
 export function describeAttachment(attachment: AttachmentInfo): string {
   const parts = [attachmentKindLabel(attachment.contentType)]
   if (attachment.filename) parts.push(attachment.filename)
@@ -49,12 +42,6 @@ export interface UserTextOptions {
   newSinceLastWake?: number
 }
 
-/**
- * 组装这条 @ 消息送进 agent 的正文。
- *
- * 附件分两拨给：被引用那条消息带的、以及当前这条消息自带的 ——
- * 「引用一张图再 @ 它」走的是前者，被引用消息没有文字，附件全在那里。
- */
 export function buildUserText(msg: StoredMessage, options: UserTextOptions = {}): string {
   const where = msg.scope === 'group' ? '群里' : '单聊里'
   const who = msg.senderName ?? msg.senderId

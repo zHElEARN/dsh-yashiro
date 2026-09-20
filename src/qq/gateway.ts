@@ -1,29 +1,23 @@
 /**
- * QQ 平台网关：负责连接、事件归一化、发送。
+ * QQ 平台网关：连接、事件归一化、发送。
  *
- * 事件形态（2026-09-20 实测，官方"接收所有消息"模式下）：
- *   - 群里所有消息都以 `GROUP_MESSAGE_CREATE` 推送，**包括 @ 机器人的那些**。
- *   - 是否 @ 了机器人看 `mentions[].is_you`，而不是看事件名。
- *   - `content` 里的 @ 标记是 `<@OPENID>` 形式，**不会被平台剥掉**，得自己剥。
- *   - 引用消息的 `msg_elements[0].content` 是被引用那条的正文（聊天记录会被平台
- *     展开成一整段文本）。
- *
- * 所以本插件同时兼容两种事件名：没开全量模式的群只会推 GROUP_AT_MESSAGE_CREATE。
+ * 三个平台侧的坑：全量模式下 @ 消息也叫 `GROUP_MESSAGE_CREATE`（判断靠 `mentions[].is_you`，
+ * 不能看事件名）；`content` 里的 `<@OPENID>` 标记平台不会剥；`msg_elements[0]` 才是被引用
+ * 那条消息。没开全量模式的群只会推 `GROUP_AT_MESSAGE_CREATE`，两种事件名都要认。
  */
 import { QQBot } from '@tencent-connect/qqbot-nodejs'
 import type { InboundMessage } from '@tencent-connect/qqbot-nodejs'
 import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs'
 import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol'
 
-import type { Config } from './config.js'
-import type { AttachmentInfo, StoredMessage } from './store.js'
+import type { Config } from '../core/config.js'
+import type { AttachmentInfo, StoredMessage } from '../store.js'
 
-/** 群全量消息的 intent 位。官方文档写 1<<25 就够，实测需要额外带上这一位。 */
+/** 官方文档说 GROUP_MESSAGE (1<<25) 就够，但收非 @ 消息必须额外带上这一位 */
 const GROUP_MESSAGE_INTENT = 1 << 24
 
 const SANDBOX_BASE_URL = 'https://sandbox.api.sgroup.qq.com'
 
-/** `mentions` 数组元素（只声明我们用得到的字段） */
 interface MentionLike {
   is_you?: boolean
   bot?: boolean
@@ -31,7 +25,7 @@ interface MentionLike {
   username?: string
 }
 
-/** 平台给的原始附件结构 */
+/** 平台给的原始结构，字段名是下划线风格；只声明我们用得到的 */
 interface RawAttachmentLike {
   content_type?: string
   url?: string
@@ -43,19 +37,17 @@ interface RawAttachmentLike {
   voice_wav_url?: string
 }
 
-/** `msg_elements` 数组元素 */
 interface MsgElementLike {
   content?: string
   message_type?: number
   attachments?: RawAttachmentLike[]
 }
 
-/** 从 content 里剥掉 `<@OPENID>` / `<@!OPENID>` 标记 */
+/** 剥掉 `<@OPENID>` / `<@!OPENID>` */
 export function stripMentionMarkers(content: string): string {
   return content.replace(/<@!?[0-9A-Za-z_-]+>/g, ' ').replace(/[ \t]{2,}/g, ' ').trim()
 }
 
-/** 这条消息是否 @ 了机器人 */
 export function isBotMentioned(msg: InboundMessage): boolean {
   // 老形态：平台直接推的 @ 事件，必然 @ 了机器人
   if (msg.rawEventType === 'GROUP_AT_MESSAGE_CREATE' || msg.rawEventType === 'AT_MESSAGE_CREATE') {
@@ -68,7 +60,7 @@ export function isBotMentioned(msg: InboundMessage): boolean {
   return false
 }
 
-/** 原始附件 → 我们的附件结构（只搬运元信息，不下载） */
+/** 平台附件 → 只搬元信息，不下载文件本体 */
 function toAttachmentInfo(raw: RawAttachmentLike, from: 'current' | 'quoted'): AttachmentInfo {
   return {
     contentType: raw.content_type ? String(raw.content_type) : 'unknown',
@@ -83,7 +75,6 @@ function toAttachmentInfo(raw: RawAttachmentLike, from: 'current' | 'quoted'): A
   }
 }
 
-/** 把 SDK 归一化后的入站消息转成我们要存的一条记录 */
 export function normalizeInbound(appId: string, msg: InboundMessage): StoredMessage | null {
   const scope: 'group' | 'c2c' = msg.kind === 'c2c' ? 'c2c' : 'group'
   if (msg.kind !== 'group' && msg.kind !== 'c2c') return null
@@ -95,10 +86,8 @@ export function normalizeInbound(appId: string, msg: InboundMessage): StoredMess
   const quotedElement = elements?.[0]
   const quoted = quotedElement?.content
 
-  // 附件有两个来源，都要带上：
-  //   - 当前这条消息自带的（msg.attachments）
-  //   - 被引用那条消息带的（msg.msgElements[0].attachments）
-  // 引用一张纯图片时，被引用消息没有文字，附件全在后者 —— 这正是之前漏掉的那条路径。
+  // 附件有两个来源，都必须带上：当前消息的 msg.attachments、被引用消息的
+  // elements[0].attachments（引用一张纯图片时，附件全在后者，正文是空的）
   const ownAttachments = (msg.attachments ?? []) as unknown as RawAttachmentLike[]
   const quotedAttachments = quotedElement?.attachments ?? []
   const attachments: AttachmentInfo[] = [
@@ -123,18 +112,14 @@ export function normalizeInbound(appId: string, msg: InboundMessage): StoredMess
 }
 
 export interface GatewayHandlers {
-  /** 收到一条归一化后的消息（已入库之前调用） */
+  /** 回调时消息还没入库，落库由 handler 自己负责 */
   onMessage(msg: StoredMessage): void
   onReady(): void
   onError(err: unknown): void
-  /**
-   * 审批按钮被点击（INTERACTION_CREATE）。返回要回给平台的 ack code
-   * （0 成功 / 4 没权限）；返回 undefined 表示不是本插件的按钮。
-   */
+  /** 审批按钮被点击。返回 ack code（0 成功 / 4 没权限）；undefined = 不是本插件的按钮 */
   onInteraction?(event: InteractionEvent): number | undefined
 }
 
-/** 薄封装：QQBot 生命周期 + 发送 */
 export class YashiroGateway {
   private readonly bot: QQBot
   private readonly log: (msg: string) => void
@@ -206,10 +191,7 @@ export class YashiroGateway {
     })
   }
 
-  /**
-   * 发一条带内联键盘的 markdown（审批卡片用）。
-   * 走主动发送，不依赖 msg_id —— 审批可能落在被动回复窗口之外。
-   */
+  /** 发带内联键盘的 markdown（审批卡片）。主动发送，不依赖 msg_id */
   async sendCard(
     scope: 'group' | 'c2c',
     targetId: string,
@@ -219,10 +201,7 @@ export class YashiroGateway {
     await this.bot.sendMarkdown({ scope, targetId }, text, keyboard === undefined ? undefined : { keyboard })
   }
 
-  /**
-   * 启动连接。`bot.start()` 会一直阻塞到 stop()，所以这里不 await ——
-   * 连接在后台建立，失败会走 onError。
-   */
+  /** `bot.start()` 会一直阻塞到 stop()，所以这里不能 await，连接在后台建立 */
   start(): void {
     if (this.started) return
     this.started = true
@@ -241,7 +220,7 @@ export class YashiroGateway {
     }
   }
 
-  /** 往一个群/用户主动发送消息（不依赖 msg_id）。超长自动切分。 */
+  /** 主动发送（不依赖 msg_id），超长自动切分 */
   async send(scope: 'group' | 'c2c', targetId: string, text: string): Promise<number> {
     const chunks = chunkText(text, this.config.sendChunkLimit)
     let sent = 0
@@ -254,7 +233,7 @@ export class YashiroGateway {
   }
 }
 
-/** 按长度切分文本，尽量在换行处断开 */
+/** 优先在换行 / 句号 / 空格处断开，切点太靠前就硬切 */
 export function chunkText(text: string, limit: number): string[] {
   const normalized = text.replace(/\r\n/g, '\n').trim()
   if (normalized.length <= limit) return [normalized]

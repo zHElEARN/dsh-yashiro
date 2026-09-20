@@ -1,74 +1,59 @@
 /**
- * 群消息历史库。
+ * 群消息历史库：群里所有消息（含没 @ 机器人的）都落这里，只有 @ 过的会进 agent 上下文。
  *
- * 设计要点（对应我们的架构决定）：
- * - **群里所有消息都落这里**，包括没 @ 机器人的那些。
- * - **只有 @ 机器人的消息才会进 agent 的上下文**；其余消息 agent 想看得自己调
- *   `qqbot_history` 工具来查。
- * - 用 node:sqlite（Node 22.5+ 内置），零原生依赖。
- * - 检索用 LIKE 而不是 FTS5：FTS5 的默认分词器对中文几乎没用，除非额外挂
- *   CJK 分词器。群消息以中文为主，LIKE 反而更可靠。
+ * 用 node:sqlite（Node 22.5+ 内置）零原生依赖；检索用 LIKE 而非 FTS5 —— FTS5 默认
+ * 分词器对中文几乎没用，群消息又以中文为主。
  */
+import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-/**
- * 附件元数据。
- *
- * 插件**只记录平台给的元信息，不下载文件、不做持久化** ——
- * 图片怎么看、什么时候下，全交给 agent 自己决定（QQ 的 URL 带时效，过期就算了）。
- * `from` 区分这份附件挂在哪条消息上：当前这条，还是被引用的那条。
- */
+import { platformNowIso } from './core/time.js'
+
+/** 只记录平台给的元信息，不下载文件、不持久化 */
 export interface AttachmentInfo {
-  /** 平台给的 MIME 类型：image/jpeg、voice、video/mp4、file 等 */
+  /** MIME 类型：image/jpeg、voice、video/mp4、file 等 */
   contentType: string
-  /** 附件挂在当前消息上还是被引用的消息上 */
+  /** 附件挂在当前消息上，还是被引用的那条消息上 */
   from: 'current' | 'quoted'
   url?: string
   filename?: string
   size?: number
   width?: number
   height?: number
-  /** 语音消息的平台转写文本（有的话直接用，不用下载） */
+  /** 语音的平台转写文本 */
   asrText?: string
-  /** 语音消息平台转码后的 WAV URL */
+  /** 语音平台转码后的 WAV URL */
   voiceWavUrl?: string
 }
 
-/** 一条被记录下来的群/单聊消息 */
 export interface StoredMessage {
   appId: string
   /** group = 群聊，c2c = 单聊 */
   scope: 'group' | 'c2c'
   /** 群 openid 或用户 openid */
   peerId: string
-  /** 平台消息 ID */
   messageId: string
-  /** 发送者 openid */
   senderId: string
-  /** 发送者昵称 */
   senderName?: string
-  /** 文本内容（已剥掉 <@...> 标记） */
+  /** 已剥掉 `<@...>` 标记 */
   content: string
-  /** 这条消息是否 @ 了机器人 */
   mentionsBot: boolean
-  /** 被引用消息的内容（QQ 引用消息时平台会带上） */
+  /** QQ 引用消息时平台会带上 */
   quotedContent?: string
-  /** 附件元数据（当前消息的 + 被引用消息的，靠 `from` 区分） */
   attachments?: AttachmentInfo[]
-  /** 原始事件类型 */
   rawEventType: string
   /** 平台时间戳（RFC3339） */
   timestamp: string
 }
 
-/** 一条查询结果 */
+/** 比 StoredMessage 多两个查询用的列 */
 export interface HistoryRow extends StoredMessage {
-  /** 自增主键，按时间递增 */
+  /** 自增主键 */
   seq: number
-  /** epoch 毫秒，便于范围查询 */
+  /** epoch 毫秒 */
   ts: number
 }
 
@@ -76,21 +61,20 @@ export interface SearchOptions {
   appId: string
   scope?: 'group' | 'c2c'
   peerId?: string
-  /** 关键词，匹配消息正文与引用正文 */
+  /** 子串匹配消息正文与引用正文 */
   query?: string
-  /** 按发送者昵称过滤（模糊匹配） */
+  /** 发送者昵称，模糊匹配 */
   senderName?: string
-  /** 起始时间，epoch 毫秒 */
+  /** epoch 毫秒 */
   since?: number
-  /** 结束时间，epoch 毫秒 */
+  /** epoch 毫秒 */
   until?: number
-  /** 返回条数上限 */
   limit: number
-  /** 排序方向，默认由近及远（desc） */
+  /** 默认 desc，由近及远 */
   order?: 'asc' | 'desc'
 }
 
-/** 默认历史库路径：$DSH_HOME/storages/dsh-yashiro/history.db */
+/** 默认落在 $DSH_HOME/storages/dsh-yashiro/history.db */
 export function defaultHistoryDbPath(): string {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
   return join(home, 'storages', 'dsh-yashiro', 'history.db')
@@ -98,7 +82,7 @@ export function defaultHistoryDbPath(): string {
 
 export class HistoryStore {
   private readonly db: DatabaseSync
-  /** 库文件路径（插件日志会写到同目录下） */
+  /** 插件日志会写到同目录下 */
   readonly path: string
 
   constructor(path: string) {
@@ -156,7 +140,27 @@ export class HistoryStore {
       )
   }
 
-  /** 按条件检索 */
+  /**
+   * 机器人自己发出的消息也记一笔，历史里才看得到双方说过的话。
+   *
+   * message_id 是合成的：出站没有平台 id，而 `(app_id, message_id)` 是唯一索引，
+   * 用 uuid 才不会让同一毫秒内的两条发言互相顶掉。
+   */
+  appendOutbound(appId: string, scope: 'group' | 'c2c', peerId: string, content: string): void {
+    this.append({
+      appId,
+      scope,
+      peerId,
+      messageId: `outbound-${randomUUID()}`,
+      senderId: 'SELF',
+      senderName: '你（机器人）',
+      content,
+      mentionsBot: false,
+      rawEventType: 'OUTBOUND',
+      timestamp: platformNowIso(),
+    })
+  }
+
   search(opts: SearchOptions): HistoryRow[] {
     const where: string[] = ['app_id = ?']
     const params: Array<string | number> = [opts.appId]
@@ -204,7 +208,7 @@ export class HistoryStore {
     return rows.map(toHistoryRow)
   }
 
-  /** 某个会话最近 n 条（含机器人自己的发言，方便 agent 回忆上下文） */
+  /** 某个会话最近 n 条，按时间正序；含机器人自己的发言 */
   recent(appId: string, peerId: string, limit: number): HistoryRow[] {
     const rows = this.db
       .prepare(
@@ -221,7 +225,7 @@ export class HistoryStore {
     return rows.map(toHistoryRow)
   }
 
-  /** 自某个时间点以来、某个会话里、@ 过机器人之外的消息条数 */
+  /** 该会话自某个时间点以来有多少条消息；excludeMentions 为真时只数非 @ 的 */
   countSince(appId: string, peerId: string, sinceMs: number, excludeMentions = false): number {
     const sql = excludeMentions
       ? 'SELECT COUNT(*) AS n FROM messages WHERE app_id = ? AND peer_id = ? AND ts > ? AND mentions_bot = 0'
@@ -230,7 +234,7 @@ export class HistoryStore {
     return row?.n ?? 0
   }
 
-  /** 该会话里最后一条消息的时间（epoch ms），没有则返回 undefined */
+  /** 该会话最后一条消息的时间（epoch ms），没有则 undefined */
   lastTs(appId: string, peerId: string): number | undefined {
     const row = this.db
       .prepare('SELECT MAX(ts) AS ts FROM messages WHERE app_id = ? AND peer_id = ?')

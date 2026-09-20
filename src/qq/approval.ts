@@ -1,22 +1,15 @@
 /**
- * 审批通道：把 dsh 的 `approval/request` 桥接到 QQ 群里的两个按钮。
+ * 把 dsh 的 `approval/request` 桥接成 QQ 群里的两个按钮。
  *
- * 链路：agent 在工作区外动手 → 沙箱拒绝 → 模型按工具说明用 `sandbox_permissions`
- * + `justification` 重试一次 → dsh-tools 走 `approval.request()` → `approval/request`
- * waterfall → 这里。按钮点击以 `INTERACTION_CREATE` 从 WebSocket 推回来，不需要
- * 回调服务器，也不需要开通 interaction 之外的 intent。
- *
- * 语义对齐 dsh-user-approval（结构化契约，不硬依赖那个包）：
- * - outcome 是闭合集合 allowed-once / rejected / cancelled / unavailable，只有
- *   allowed-once 放行；
- * - 卡片发不出去就返回 unavailable（fail closed）；
- * - request.signal abort → cancelled；插件卸载 → 全部 cancelled。
- *
- * 每个会话同时只挂一个 pending：审批会把那一轮阻塞住，正常情况下不会并发。
+ * outcome 是闭合集合，只有 allowed-once 放行；卡片发不出去、那一轮被取消、插件卸载
+ * 一律 fail closed（unavailable / cancelled）。按钮点击走 INTERACTION_CREATE，
+ * 由 WebSocket 推回来，不需要回调服务器。
  */
 import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs'
 
-// ── 最小契约（对齐 dsh-user-approval，避免硬依赖） ──
+import { sessionKeyOf } from '../agent/sessions.js'
+
+// ── 最小契约（结构化对齐 dsh-user-approval，但不硬依赖那个包） ──
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
@@ -27,18 +20,15 @@ interface ApprovalSessionEvent {
 }
 
 /**
- * session log 的最小读取面。
- *
- * dsh rc.2 的 Session **没有 `events` 数组**，只有 `eventAt(seq)` 和 `get seq()`；
- * 腾讯官方插件的契约里写的是 `session.events`。两种都兼容，读不到就回退成
- * "没有命令可回显"，绝不让回显这一步把审批本身搞挂。
+ * dsh rc.2 的 Session 没有 `events` 数组，只有 `eventAt(seq)` + `seq`；官方插件的契约
+ * 写的是 `session.events`。两种都读，读不到就当「没有命令可回显」，不让回显拖垮审批。
  */
 interface ApprovalSessionLike {
-  /** 事件总数（rc.2 就是日志偏移量） */
+  /** 事件总数，rc.2 里就是日志偏移量 */
   seq?: number
-  /** 按下标取事件（rc.2） */
+  /** 按下标取事件 */
   eventAt?(seq: number): ApprovalSessionEvent | undefined
-  /** 整份事件数组（官方插件的契约形状） */
+  /** 整份事件数组，官方插件的契约形状 */
   events?: ApprovalSessionEvent[]
 }
 
@@ -52,14 +42,14 @@ export interface ApprovalRequest {
   signal?: AbortSignal
 }
 
-/** 一条 QQ 会话的身份：发卡片要知道发到哪，pending 以 sessionKey 为键 */
+/** 发卡片要知道发到哪；pending 以 sessionKey 为键 */
 export interface ApprovalTarget {
   sessionKey: string
   scope: 'group' | 'c2c'
   peerId: string
 }
 
-/** 卡片发不出去 / 超时提示用的发送口（gateway 提供） */
+/** 发卡片与超时提示的出口，由 gateway 提供 */
 export type ApprovalSender = (
   target: ApprovalTarget,
   text: string,
@@ -73,7 +63,7 @@ export interface ApprovalLogger {
   debug(message: string): void
 }
 
-/** 只需要用到 cordis 的两个能力，便于单测时替身 */
+/** 只用到 cordis 的两个能力，便于测试时替身 */
 export interface ApprovalContext {
   get(name: string): unknown
   on(event: string, handler: (...args: unknown[]) => unknown, options?: { prepend?: boolean }): void
@@ -82,7 +72,7 @@ export interface ApprovalContext {
 // ── button_data 编解码 ──
 
 interface ApprovalButtonData {
-  /** 顶层判别字段：QQ 只有一个 interaction 入口，靠它路由到对应通道 */
+  /** QQ 只有一个 interaction 入口，靠这个判别字段路由到对应通道 */
   t: 'approval'
   d: 'allow' | 'deny'
 }
@@ -109,10 +99,7 @@ export function decodeApprovalButton(raw: string): ApprovalButtonData | undefine
 /** 命令回显的截断长度 */
 const COMMAND_CLIP = 500
 
-/**
- * 从 session log 按 callId 倒着找回被 gate 的命令（对齐官方 commandOf 的语义）。
- * 读不到事件或匹配不上都返回 undefined —— 回显只是锦上添花。
- */
+/** 按 callId 倒着回日志里找被 gate 的命令；找不到返回 undefined，回显只是锦上添花 */
 export function commandOf(request: ApprovalRequest): string | undefined {
   if (request.callId === undefined) return undefined
   const session = request.agent.session
@@ -144,7 +131,7 @@ export function commandOf(request: ApprovalRequest): string | undefined {
   return undefined
 }
 
-/** 把审批请求渲染成 QQ markdown 卡片（timeoutMs 是毫秒，和通道里的单位一致） */
+/** timeoutMs 是毫秒，与通道内部单位一致 */
 export function buildApprovalText(
   request: ApprovalRequest,
   command: string | undefined,
@@ -160,11 +147,8 @@ export function buildApprovalText(
 type ButtonPermission = InlineKeyboard['content']['rows'][number]['buttons'][number]['action']['permission']
 
 /**
- * 构建审批键盘：允许一次 / 拒绝。
- *
- * `group_id` 相同 → 点过一个之后另一个变灰；`click_limit: 1` → 每个按钮只能点一次。
- * approvers 非空时把按钮限给这些人（permission.type=0 + specify_user_ids，平台侧
- * 只让名单内的人可点），点回来还会再校验一次。
+ * 允许一次 / 拒绝。`group_id` 相同是为了点过一个另一个就变灰，`click_limit: 1`
+ * 限制每个按钮只能点一次；approvers 非空时按钮在平台侧也只对名单内的人可点。
  */
 export function buildApprovalKeyboard(approvers: readonly string[]): InlineKeyboard {
   const permission: ButtonPermission =
@@ -212,14 +196,14 @@ interface PendingApproval {
 const DEFAULT_TIMEOUT_MS = 300_000
 
 export interface ApprovalChannelDeps {
-  /** 本插件启动时的 appId（sessionKey 由它派生） */
+  /** sessionKey 由它派生 */
   appId: string
-  /** 谁能点按钮；空数组 = 群里任何人都能点。缺省按空处理 */
+  /** 空数组 = 群里任何人都能点 */
   approvers?: readonly string[]
-  /** 多久无人处理按拒绝收场（毫秒）。缺省 5 分钟 */
+  /** 多久无人处理按拒绝收场（毫秒），缺省 5 分钟 */
   timeoutMs?: number
   send: ApprovalSender
-  /** sessionId → 本插件的会话身份；不是本插件的会话返回 undefined */
+  /** 不是本插件的会话返回 undefined，交回链上其他应答者 */
   findTarget(sessionId: string): ApprovalTarget | undefined
   logger: ApprovalLogger
 }
@@ -235,7 +219,7 @@ export class ApprovalChannel {
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
-  /** 注册 approval/request waterfall 应答者；没有 approval 服务时优雅停用 */
+  /** 注册 approval/request waterfall；没有 approval 服务时优雅停用 */
   install(ctx: ApprovalContext): void {
     let hasApproval = false
     try {
@@ -258,10 +242,7 @@ export class ApprovalChannel {
     )
   }
 
-  /**
-   * 按钮点击：返回要回给平台的 ack code（0 成功 / 4 没权限），
-   * undefined = 不是本通道的按钮，交给别的通道、由调用方回 3（重复操作）。
-   */
+  /** 返回 ack code（0 成功 / 4 没权限）；undefined = 不是本通道的按钮，交回调用方 */
   handleInteraction(event: InteractionEvent): number | undefined {
     const raw = event.data?.resolved?.button_data
     if (raw === undefined) return undefined
@@ -271,7 +252,7 @@ export class ApprovalChannel {
     const scope: 'group' | 'c2c' = event.scene === 'group' ? 'group' : 'c2c'
     const peerId = scope === 'group' ? (event.group_openid ?? '') : (event.user_openid ?? '')
     if (peerId === '') return undefined
-    const sessionKey = `yashiro:${this.deps.appId}:${scope}:${peerId}`
+    const sessionKey = sessionKeyOf(this.deps.appId, scope, peerId)
     const entry = this.pending.get(sessionKey)
     if (entry === undefined) return undefined
 
@@ -288,12 +269,12 @@ export class ApprovalChannel {
     return 0
   }
 
-  /** 取消全部 pending（插件卸载时调用，避免 Promise 悬挂） */
+  /** 插件卸载时调用，避免 Promise 悬挂 */
   cancelAll(): void {
     for (const key of [...this.pending.keys()]) this.settle(key, 'cancelled')
   }
 
-  /** 不是本插件的会话 → 交给链上其他应答者（web / tui 可以共存） */
+  /** 不是本插件的会话就放行给链上其他应答者，web / tui 审批通道可以共存 */
   private async route(
     request: ApprovalRequest,
     next: () => Promise<ApprovalOutcome>,

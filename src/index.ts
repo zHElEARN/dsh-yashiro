@@ -1,20 +1,8 @@
 /**
- * dsh-yashiro —— QQ 群机器人通道插件（dsh bundle 入口）。
+ * dsh-yashiro：把 QQ 群消息接进 dsh agent 回合，并把 qqbot_history / qqbot_send
+ * 两个工具挂给这个会话专属的 agent。
  *
- * 架构一句话：**QQ 只是感官和发声器官，dsh agent 才是主体。**
- *
- *   QQ 消息 ──▶ 入库（全部） ──┬─ 没 @ 机器人 ──▶ 到此为止
- *                             └─ @ 了机器人 ──▶ 唤醒 agent 回合
- *
- *   agent ──▶ qqbot_history（自己查群里聊过什么）
- *         └─▶ qqbot_send（唯一的发声通道）
- *
- * 关键取舍（都是和用户确认过的）：
- * - 插件**不接管 agent 的输出**：回复完全由 agent 调 qqbot_send 完成，
- *   思考过程和工具调用一律不同步到 QQ。
- * - 非 @ 消息**只入库、不进上下文**，agent 需要时自己查。
- * - 一个 QQ 会话（群/单聊）= 一条 dsh 会话，SessionId 确定性派生，可跨重启恢复。
- * - v1 不做斜杠命令、不做上下文压缩、不做多会话切换。
+ * 所有群消息入库；只有 @ 机器人的消息会唤醒 agent，回复完全由它调 qqbot_send 完成。
  */
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -23,29 +11,28 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
-import { buildIdReply, decideAccess, ID_COMMAND, isIdCommand } from './access.js'
-import { ApprovalChannel, type ApprovalContext } from './approval.js'
-import { Config } from './config.js'
-import { YashiroGateway } from './gateway.js'
-import { buildUserText } from './message-text.js'
-import { DEFAULT_SYSTEM_PROMPT } from './prompt.js'
-import { SessionManager } from './sessions.js'
+import { DEFAULT_SYSTEM_PROMPT } from './agent/prompt.js'
+import { SessionManager } from './agent/sessions.js'
+import { createAgentTools } from './agent/tools.js'
+import { Config } from './core/config.js'
+import { describeError } from './core/errors.js'
+import { buildIdReply, decideAccess, ID_COMMAND, isIdCommand } from './qq/access.js'
+import { ApprovalChannel, type ApprovalContext } from './qq/approval.js'
+import { YashiroGateway } from './qq/gateway.js'
+import { buildUserText } from './qq/message-text.js'
 import { defaultHistoryDbPath, HistoryStore, type StoredMessage } from './store.js'
-import { platformNowIso } from './time.js'
-import { createAgentTools } from './tools.js'
 
 export const name = 'dsh-yashiro'
 
-/** 依赖的 cordis 服务：agent 注册表、工具注册表、系统提示词注册表 */
+/** 依赖的 cordis 服务：agent 注册表、默认模型、工具注册表、系统提示词注册表 */
 export const inject = ['agents', 'agentDefaultModel', 'tools', 'systemPrompt']
 
 export { Config }
-export type { Config as YashiroConfig } from './config.js'
+export type { Config as YashiroConfig } from './core/config.js'
 
-/** 唤醒 agent 时，作为 user 消息来源的插件标识 */
 const PLUGIN_ID = 'dsh-yashiro'
 
-/** 同一会话里最多记多少个已处理的消息 ID，用于去重 */
+/** 每个会话记住多少条已处理的消息 ID；超出就丢最早的 */
 const DEDUPE_WINDOW = 200
 
 export function apply(ctx: Context, config: Config): void {
@@ -57,8 +44,7 @@ export function apply(ctx: Context, config: Config): void {
   /** 已处理过的消息 ID（每个会话），防止平台重推导致重复唤醒 */
   const seenMessages = new Map<string, Set<string>>()
 
-  // headless profile 下 ctx.logger 没有可见出口，所以自己再写一份文件日志，
-  // 方便排查（路径：历史库同目录下的 plugin.log）
+  // headless profile 下 ctx.logger 没有可见出口，所以在历史库同目录再写一份 plugin.log
   const logFile = join(dirname(store.path), 'plugin.log')
   try {
     mkdirSync(dirname(logFile), { recursive: true })
@@ -70,7 +56,7 @@ export function apply(ctx: Context, config: Config): void {
     try {
       appendFileSync(logFile, `${new Date().toISOString()} [${level}] ${message}\n`)
     } catch {
-      /* 写不进去就算了，不能因为日志把主流程搞挂 */
+      /* 日志写不进去也不能影响主流程 */
     }
   }
   const logger = {
@@ -91,8 +77,7 @@ export function apply(ctx: Context, config: Config): void {
 
   const sessions = new SessionManager(ctx, config.appId, config.cwd?.trim() || process.cwd(), logger)
 
-  // 网关与审批通道互相引用（审批卡片经网关发出去，按钮点击由网关转给审批通道）。
-  // 先声明类型、后赋值，避免 TS 的类型推断绕成环。
+  // 网关与审批通道互相引用，先声明类型后赋值，避免 TS 的类型推断绕成环
   let gateway: YashiroGateway
 
   const approval = new ApprovalChannel({
@@ -133,37 +118,23 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** 机器人自己发出的消息也记一笔，保持「历史里能看到双方说过的话」 */
   function recordOutbound(scope: 'group' | 'c2c', peerId: string, text: string): void {
     try {
-      store.append({
-        appId: config.appId,
-        scope,
-        peerId,
-        messageId: `outbound-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        senderId: 'SELF',
-        senderName: '你（机器人）',
-        content: text,
-        mentionsBot: false,
-        rawEventType: 'OUTBOUND',
-        timestamp: platformNowIso(),
-      })
+      store.appendOutbound(config.appId, scope, peerId, text)
     } catch (err) {
-      logger.error(`[dsh-yashiro] 记录出站消息失败: ${describe(err)}`)
+      logger.error(`[dsh-yashiro] 记录出站消息失败: ${describeError(err)}`)
     }
   }
 
   async function handleMessage(msg: StoredMessage): Promise<void> {
-    // 1) 无论 @ 与否、是否被放行，全部进历史库。
-    //    访问控制只决定「要不要唤醒 agent」，不决定「要不要记录」。
+    // 入库先于访问控制：白名单只决定「要不要唤醒 agent」，不决定「要不要记录」
     try {
       store.append(msg)
     } catch (err) {
-      logger.error(`[dsh-yashiro] 写入历史库失败: ${describe(err)}`)
+      logger.error(`[dsh-yashiro] 写入历史库失败: ${describeError(err)}`)
     }
 
-    // 2) `/id` 豁免指令：需要 @ 机器人，但绕过白名单与黑名单，插件直接回复、不进 dsh。
-    //    放在这里是为了打破自举 —— 不知道 group openid 就没法配白名单。
+    // `/id` 绕过访问控制：不知道 group openid 就没法配白名单，这个自举口子必须留着
     if (isIdCommand(msg.content, msg.mentionsBot)) {
       try {
         const reply = buildIdReply(msg)
@@ -171,31 +142,27 @@ export function apply(ctx: Context, config: Config): void {
         recordOutbound(msg.scope, msg.peerId, reply)
         logger.info(`[dsh-yashiro] 已响应 ${ID_COMMAND}：${msg.scope} ${msg.peerId}`)
       } catch (err) {
-        logger.error(`[dsh-yashiro] 回复 ${ID_COMMAND} 失败: ${describe(err)}`)
+        logger.error(`[dsh-yashiro] 回复 ${ID_COMMAND} 失败: ${describeError(err)}`)
       }
       return
     }
 
-    // 3) 白名单：严格生效，空数组 = 全禁（群与单聊各一份，都不支持通配符）
     const access = decideAccess(msg, config)
     if (access.action === 'deny-peer') {
       logger.debug(`[dsh-yashiro] 会话未放行（${access.reason}）：${msg.scope} ${msg.peerId}`)
       return
     }
 
-    // 4) 没 @ 机器人 → 只入库，不打扰 agent
     if (!msg.mentionsBot) {
       logger.debug(`[trace] 非 @ 消息，仅入库: ${JSON.stringify(msg.content.slice(0, 40))}`)
       return
     }
 
-    // 5) 发送者黑名单：只拦 @ 触发，消息已经在上面入过库了
     if (access.action === 'deny-sender') {
       logger.info(`[dsh-yashiro] 发送者在黑名单，跳过唤醒：${msg.senderId}`)
       return
     }
 
-    // 6) 去重
     const dedupeKey = `${msg.scope}:${msg.peerId}`
     let seen = seenMessages.get(dedupeKey)
     if (!seen) {
@@ -209,7 +176,7 @@ export function apply(ctx: Context, config: Config): void {
       if (first !== undefined) seen.delete(first)
     }
 
-    // 7) 统计「你不在的时候群里聊了多少」（首次唤醒不报，免得上来就是几千条）
+    // 首次唤醒不报数，否则 agent 一上来就被告知「有几千条新消息」
     const previousWake = lastWakeAt.get(dedupeKey)
     let newSinceLastWake: number | undefined
     if (config.announceNewMessageCount && previousWake !== undefined) {
@@ -220,7 +187,6 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    // 6) 唤醒 agent
     try {
       logger.debug(`[trace] 准备建立/复用会话 peer=${msg.peerId}`)
       const agent = await sessions.getOrCreate(msg.scope, msg.peerId, buildSetup(msg.scope, msg.peerId))
@@ -229,8 +195,7 @@ export function apply(ctx: Context, config: Config): void {
         content: [{ type: 'text', text: buildUserText(msg, { newSinceLastWake }) }],
         source: { kind: 'plugin', plugin: PLUGIN_ID },
       })
-      // 默认插队：它正在跑回合时，这条消息在下一个 step 边界就被看到；
-      // 配成 queue 则排队等下一个回合，第一条回复完全不受影响。
+      // queue 是等当前回合结束再开新回合；steer 在当前回合的下一个 step 边界就注入
       if (config.busyDelivery === 'queue') agent.followup(message)
       else agent.steer(message)
       logger.debug(`[trace] ${config.busyDelivery} 已提交`)
@@ -239,7 +204,7 @@ export function apply(ctx: Context, config: Config): void {
         `[dsh-yashiro] 已唤醒 agent：session=${String(agent.id).slice(0, 12)}… peer=${msg.peerId}`,
       )
     } catch (err) {
-      logger.error(`[dsh-yashiro] 唤醒 agent 失败: ${describe(err)}`)
+      logger.error(`[dsh-yashiro] 唤醒 agent 失败: ${describeError(err)}`)
     }
   }
 
@@ -248,7 +213,7 @@ export function apply(ctx: Context, config: Config): void {
     `[dsh-yashiro] 已启动（appId=${config.appId} 沙箱=${config.sandbox} 库=${config.historyDbPath?.trim() || defaultHistoryDbPath()}）`,
   )
 
-  // cordis 的生命周期钩子：effect 返回的函数在本插件 fiber 销毁时执行
+  // effect 返回的函数在本插件 fiber 销毁时执行
   ctx.effect(() => () => {
     logger.info('[dsh-yashiro] 正在关闭…')
     approval.cancelAll()
@@ -256,9 +221,4 @@ export function apply(ctx: Context, config: Config): void {
     void sessions.disposeAll()
     store.close()
   })
-}
-
-function describe(err: unknown): string {
-  if (err instanceof Error) return `${err.name}: ${err.message}\n${err.stack ?? ''}`
-  return String(err)
 }

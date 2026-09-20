@@ -1,19 +1,15 @@
 /**
- * 挂给 agent 的两个工具。
+ * 挂给每个 agent 的两个工具。
  *
- * 两个工具都是 **agent-scoped** 的：它们通过闭包绑定到这个 agent 所属的那个
- * 群/单聊，agent 不需要（也不能）指定目标，避免它手滑发到别的群去。
- *
- * 注册发生在 `ctx.agents.create({ setup })` 的 setup 回调里，随 agent 一起
- * 建立、随 agent 一起销毁。
+ * 它们通过闭包绑定到这个 agent 所属的群/单聊，agent 不能指定目标 —— 免得它发错群。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-import type { Config } from './config.js'
-import type { YashiroGateway } from './gateway.js'
-import type { HistoryStore } from './store.js'
-import { describeAttachment } from './message-text.js'
-import { formatTime, platformNowIso } from './time.js'
+import type { Config } from '../core/config.js'
+import { formatTime } from '../core/time.js'
+import type { YashiroGateway } from '../qq/gateway.js'
+import { describeAttachment } from '../qq/message-text.js'
+import type { HistoryStore } from '../store.js'
 
 export interface ToolDeps {
   store: HistoryStore
@@ -31,7 +27,6 @@ function truncate(text: string, limit: number): string {
   return flat.length <= limit ? flat : `${flat.slice(0, limit)}…（已截断）`
 }
 
-/** qqbot_history：让 agent 自己查群里的聊天记录 */
 export function createHistoryTool(deps: ToolDeps) {
   const { store, config, scope, peerId } = deps
   return defineTool({
@@ -125,7 +120,6 @@ export function createHistoryTool(deps: ToolDeps) {
   })
 }
 
-/** qqbot_send：agent 唯一的发声通道 */
 export function createSendTool(deps: ToolDeps) {
   const { gateway, store, config, scope, peerId } = deps
   return defineTool({
@@ -152,25 +146,12 @@ export function createSendTool(deps: ToolDeps) {
     },
     async execute(args) {
       const sent = await gateway.send(scope, peerId, args.text)
-      // 机器人自己说的话也记一笔，方便以后 agent 回忆「我上次说了什么」
-      store.append({
-        appId: config.appId,
-        scope,
-        peerId,
-        messageId: `outbound-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        senderId: 'SELF',
-        senderName: '你（机器人）',
-        content: args.text,
-        mentionsBot: false,
-        rawEventType: 'OUTBOUND',
-        timestamp: platformNowIso(),
-      })
+      store.appendOutbound(config.appId, scope, peerId, args.text)
       return { sent }
     },
   })
 }
 
-/** 一次性拿到两个工具 */
 export function createAgentTools(deps: ToolDeps) {
   return [createHistoryTool(deps), createSendTool(deps)]
 }

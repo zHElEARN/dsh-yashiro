@@ -21,7 +21,7 @@ QQ 群消息 ──▶ 归一化 ──▶ 历史库（全部入库）
                     └─▶ qqbot_send      唯一的发声通道 ──▶ QQ 群
 ```
 
-## 设计取舍（都是明确确认过的）
+## 设计取舍
 
 | 决定 | 原因 |
 |---|---|
@@ -59,8 +59,25 @@ QQ 群消息 ──▶ 归一化 ──▶ 历史库（全部入库）
 ## 自检
 
 ```sh
-pnpm selfcheck    # 70 项：附件传递、访问控制、/id 指令、时间格式化、入库检索、@判定、切分
+pnpm test    # 91 项：@标记剥离/事件归一化/附件传递/访问控制/时间格式化/入库检索/审批卡片/切分/配置
 ```
+
+测试按模块拆在 `test/` 下，与 `src/` 同构，用 Node 内置的 `node:test`（无额外依赖）。
+`pnpm test` 会先 typecheck、再 build，最后跑 `dist/` 上的用例 —— 所以它同时能抓到
+「改了 src 忘了重新构建」这类问题。
+
+## 调试
+
+```sh
+pnpm dump-session    # 打印本 workspace 最新一条会话的完整事件流
+```
+
+运行日志写在历史库同目录的 `plugin.log`（headless profile 下 `ctx.logger` 没有可见出口，
+所以插件自己还写一份文件日志）。
+
+> ⚠️ `session.v3.jsonl.zstd` 是**多个独立 zstd 帧拼接**的。`zstdDecompressSync`
+> 一次性解压只拿得到第一帧，看起来像「只有一条 session 头事件」。必须按魔数
+> `28 B5 2F FD` 切帧逐帧解 —— `scripts/dump-session.mjs` 就是这么做的。
 
 ## 安装
 
@@ -97,14 +114,14 @@ dsh --profile yashiro
 | `allowedGroups` | `[]` | 群 openid 白名单。**空 = 一个群都不放行**，必须显式列 |
 | `allowedUsers` | `[]` | 单聊 openid 白名单。**空 = 一个都不放行** |
 | `blockedSenders` | `[]` | 发送者 openid 黑名单。只拦 @ 触发，**不影响消息入库** |
-| `historyDbPath` | `$DSH_HOME/storages/dsh-yashiro/history.db` | 群历史库 |
+| `historyDbPath` | `$DSH_HOME/storages/dsh-yashiro/history.db` | 群历史库。留空即用默认路径 |
 | `historyDefaultLimit` / `historyMaxLimit` | `30` / `200` | 单次查询条数 |
 | `sendChunkLimit` | `4500` | 单条消息最大字符数，超出自动切分 |
-| `announceNewMessageCount` | `true` | @ 时附带「你不在时群里又聊了几条」 |
+| `announceNewMessageCount` | `true` | @ 时附带「自你上次开口以来群里还有几条新消息」 |
 | `busyDelivery` | `'steer'` | 它正在跑回合时新 @ 进来的消息：`steer` 插队（下个 step 就被看到）／`queue` 排队（等下一个回合） |
-| `approvers` | `[]` | 谁能点审批卡片的「允许一次」（openid 白名单）。**空 = 群里任何人都能点** |
+| `approvers` | `[]` | 谁能点审批卡片的「允许一次」（openid 白名单）。**空 = 群里任何人都能点**（与腾讯官方插件一致） |
 | `approvalTimeoutSeconds` | `300` | 审批卡片无人处理多久后按「拒绝」收场 |
-| `systemPrompt` | 内置 | 覆盖注入的系统提示词 |
+| `systemPrompt` | 内置 | 覆盖注入的系统提示词。这是 agent 知道「回复必须走 `qqbot_send`」的唯一途径，谨慎修改 |
 | `debug` | `false` | 打开后写 DEBUG 级文件日志 |
 
 ## 访问控制
@@ -135,7 +152,13 @@ bot：群 ID（group_openid）：
      04929CA16A512F57CFBCC3AD77A5D640
 
      昵称：Zhe_Learn
+
+     —
+     把群 ID 填到 allowedGroups 才会放行这个群（空 = 所有群都不放行）。
 ```
+
+单聊里发则回复「单聊 ID（user openid）… 把你的 openid 填到 allowedUsers 才会放行这个单聊」。
+回复文案只指向白名单，**不要**把自己的 openid 填进 `blockedSenders` —— 那是黑名单，等于把自己拦掉。
 
 - **需要 @ 机器人**（避免群里有人随口打出 `/id` 就触发）
 - **精确匹配**整条消息（去掉首尾空白后完全等于 `/id`），带参数不触发
@@ -170,32 +193,19 @@ agent 在会话工作区之外动手时，dsh 的沙箱会先拒绝；模型随�
 2. **`content` 里的 @ 标记不会被剥掉**，形如 `<@OPENID>`，得自己处理。
    本插件在 `stripMentionMarkers()` 里做了。
 3. **intents 要带 `1<<24`**：官方文档说 `GROUP_MESSAGE_CREATE` 用 `1<<25` 就够，
-   但社区实践和实测都需要额外带上 `GROUP_MESSAGE (1<<24)`。
+   但收非 @ 消息必须额外带上 `GROUP_MESSAGE (1<<24)`。
 4. **群主必须在群设置里给机器人开「接收所有消息」**，否则非 @ 消息根本不会推过来。
 5. **`ctx.agents.create()` 不会自己查默认模型**。`dsh-agent-default-model` 的定位是
    「回答『新 agent 该用哪个模型』，由创建 agent 的入口来咨询」，必须显式把
    `agentDefaultModel.currentSelection()` 的结果作为 `agentOptions` 传进去，
    否则 agent 没有模型路由，回合压根跑不起来（表现为：会话建了但一句话不回）。
 
-## 调试
-
-```sh
-pnpm selfcheck       # 27 项离线自检：入库/检索/去重/@判定/切分/引用
-pnpm dump-session    # 打印本 workspace 最新一条会话的完整事件流
-```
-
-运行日志写在历史库同目录的 `plugin.log`（headless profile 下 `ctx.logger` 没有可见出口，
-所以插件自己还写一份文件日志）。
-
-> ⚠️ `session.v3.jsonl.zstd` 是**多个独立 zstd 帧拼接**的。`zstdDecompressSync`
-> 一次性解压只拿得到第一帧，看起来像「只有一条 session 头事件」。必须按魔数
-> `28 B5 2F FD` 切帧逐帧解 —— `scripts/dump-session.mjs` 就是这么做的。
-
 ## 已知限制 / 后续可做
 
 - **没有斜杠命令**。要做的话，`SessionManager` 的 sessionKey 里再加一维（topic/epoch）
   就能天然支持「多会话切换」，不用改存储结构。
-- **黑名单只有 openid 一种维度**，没有白名单模式。被放行的群里，除黑名单外的人都能
+- **黑名单是纯黑名单**，没有「白名单模式」开关（要限制发送者就填 `blockedSenders`，要放行
+  会话就填 `allowedGroups`/`allowedUsers`）。被放行的群里，除黑名单外的人都能
   驱动一个**带 bash 权限**的完整 agent。
 - **审批只有「允许一次 / 拒绝」**，没有 allow-always（dsh 的审批 outcome 是闭合集合，
   只有 `allowed-once` 是放行）；卡片超时（默认 5 分钟）按拒绝处理。
@@ -203,3 +213,42 @@ pnpm dump-session    # 打印本 workspace 最新一条会话的完整事件流
   交给 agent，插件不下载、不持久化 —— 由 agent 自己决定何时 `curl` 下来再 `read_image`。
   QQ 的附件 URL 带时效，过期即放弃。
 - **历史检索用 LIKE 而非 FTS5**：FTS5 默认分词器对中文基本没用。
+
+## 代码约定
+
+### 注释：只留「删掉就会被改错」的那些
+
+判定标准只有一条 —— **把这条注释删掉，一个有经验的读者会不会误改这段代码？**
+会，就留；不会，就删。明确要留的只有五类：
+
+1. 非显然的坑：平台行为、外部 API 契约陷阱（如 `GROUP_MESSAGE` 的 intent 位要怎么拼）
+2. 设计约束的原因：为什么 fail closed、为什么回复必须走 `qqbot_send`
+3. 不明显的行为契约：如附件靠 `from` 区分「当前消息的」和「被引用消息的」
+4. 公开 API 的签名说明（一行以内）
+5. TODO / FIXME
+
+**一律不留**：把代码翻译一遍的注释（`// 按条件检索`、`// 6) 去重`）、步骤编号、
+「我这里做了什么」的旁白、写完即失效的历史事故经过（事故留在 commit message 里，
+代码里只留面向未来的约束）。
+
+### 文件头
+
+一到三行：一句话说这个文件负责什么 + 只有这个文件知道的坑。
+**架构图、设计取舍表只写在 README**，代码里不再复述 —— 两处都写必然会漂移。
+
+### 目录职责
+
+| 目录 | 职责 |
+|---|---|
+| `src/index.ts` | 插件入口：接线、消息主流程、生命周期 |
+| `src/qq/` | QQ 平台侧：网关、审批通道、访问控制、正文拼装 |
+| `src/agent/` | dsh agent 侧：会话管理、工具、系统提示词 |
+| `src/core/` | 基础件：配置、时间、错误格式化 |
+| `src/store.ts` | 历史库（唯一的持久化模块） |
+| `test/` | 与 `src/` 同构，`*.test.mjs` 直接跑 `dist/` |
+| `scripts/` | 排查工具，不是测试 |
+
+**不要重复同一份知识。** sessionKey 的格式、出站消息怎么落库这类事实，全仓库只能有
+一处定义（现在分别是 `sessionKeyOf()` 和 `store.appendOutbound()`）；第二处出现就该抽出来。
+
+改动之后跑 `pnpm test` —— 它会 typecheck + build + 跑全部用例。

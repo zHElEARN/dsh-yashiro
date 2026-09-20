@@ -1,12 +1,9 @@
 /**
- * 会话管理：一个 QQ 会话（群 / 单聊）对应一条 dsh agent 会话。
+ * 一个 QQ 会话（群 / 单聊）对应一条 dsh agent 会话。
  *
- * sessionKey 形如 `yashiro:${appId}:${scope}:${peerId}`，SessionId 由它做
- * SHA-256 确定性派生 —— 同一来源永远路由到同一条会话，进程重启后能 resume
- * 回来，不需要额外的映射表。
- *
- * 以后要做「多会话切换」时，只要往 sessionKey 里再拼一维（比如 topic 或
- * epoch），派生出来的 SessionId 自然就是另一条会话，这里不用改结构。
+ * SessionId 由 sessionKey 做 SHA-256 确定性派生，所以不需要映射表：同一来源永远
+ * 路由到同一条会话，进程重启后能 resume 回来。以后要做多会话切换，只要往
+ * sessionKey 里再拼一维（topic / epoch），派生出来自然就是另一条会话。
  */
 import { createHash } from 'node:crypto'
 
@@ -14,15 +11,15 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions, AgentSetup, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
-import type { ApprovalTarget } from './approval.js'
+import { describeError } from '../core/errors.js'
+import type { ApprovalTarget } from '../qq/approval.js'
 
-/** 一条活跃会话：agent + 可选的拆除能力 */
 interface SessionEntry {
   agent: Agent
   dispose: () => Promise<void>
 }
 
-/** workspace 域（@deepseek-ai/dsh-workspace）里我们用到的最小面 */
+/** workspace 域（@deepseek-ai/dsh-workspace）里用到的最小面，避免硬依赖 */
 interface WorkspaceLike {
   attachSession(sessionId: SessionId): Promise<void>
 }
@@ -31,6 +28,7 @@ interface WorkspaceRegistryLike {
   resolveByPath(path: string): Promise<WorkspaceLike | undefined>
 }
 
+/** 这个格式是跨模块契约：审批通道靠它把按钮点击映射回会话，改了两边必须一起改 */
 export function sessionKeyOf(appId: string, scope: 'group' | 'c2c', peerId: string): string {
   return `yashiro:${appId}:${scope}:${peerId}`
 }
@@ -59,12 +57,8 @@ export class SessionManager {
   }
 
   /**
-   * 取这次的模型路由。
-   *
-   * 这一步不能省：`ctx.agents.create()` **不会**自己去查默认模型 ——
-   * `dsh-agent-default-model` 的定位是「回答『新 agent 该用哪个模型』这个问题，
-   * 由创建 agent 的入口来咨询它」。不传 agentOptions 的话，agent 就没有模型路由，
-   * 回合根本跑不起来（表现就是：session 建了，但一句话都不回）。
+   * `ctx.agents.create()` 不会自己查默认模型，必须由调用方把 agentOptions 传进去，
+   * 否则 agent 没有模型路由，回合跑不起来（session 建了但一句话不回）。
    */
   private resolveAgentOptions(): AgentOptions | undefined {
     try {
@@ -84,10 +78,8 @@ export class SessionManager {
   }
 
   /**
-   * 找到当前启动目录对应的 workspace（只找一次，找不到就记住"没有"）。
-   *
-   * 只有 profile 挂了 workspace 域（web bundle，或单独一行 @deepseek-ai/dsh-workspace）
-   * 才会有这个服务；没挂、或者启动目录不是已注册的 workspace，都返回 null。
+   * 只找一次，找不到就记住「没有」。
+   * 只有 profile 挂了 workspace 域才有这个服务，没挂或目录未注册都返回 null。
    */
   private async resolveWorkspace(): Promise<WorkspaceLike | null> {
     if (this.workspaceEntity !== undefined) return this.workspaceEntity
@@ -104,21 +96,17 @@ export class SessionManager {
       this.workspaceEntity = found
       return found
     } catch (err) {
-      this.logger.info(`[dsh-yashiro] 查找 workspace 失败（不影响对话）：${describe(err)}`)
+      this.logger.info(`[dsh-yashiro] 查找 workspace 失败（不影响对话）：${describeError(err)}`)
       return null
     }
   }
 
   /**
-   * 把这条会话挂到 workspace 名下。
+   * 插件用 `ctx.agents.create()` 建的会话不会自动出现在 web 侧边栏里（那份记录只有
+   * web 进程自己写），必须显式挂到 workspace 名下。
    *
-   * web 侧边栏渲染的是 workspace 记录里的 sessionIds，而那份记录只有 web 进程
-   * 自己通过 API 建/派生会话时才会写入 —— 插件用 `ctx.agents.create()` 建出来的
-   * 会话不挂上去，就永远不会出现在侧边栏里。
-   *
-   * 挂载是幂等的：id 已在记录里时域内部直接空操作、不写盘。所以这里每条消息都
-   * 调一次 —— 侧边栏那份记录是整份文档覆盖写的，别的进程一写就可能把这条 id
-   * 抹掉，每次 @ 都补一下才能自愈。
+   * 挂载幂等，而那份记录是整份覆盖写的、别的进程一写就可能把这条 id 抹掉，
+   * 所以每条消息都补挂一次才能自愈。
    */
   private async attachToWorkspace(sessionId: SessionId): Promise<void> {
     const workspace = await this.resolveWorkspace()
@@ -126,11 +114,10 @@ export class SessionManager {
     try {
       await workspace.attachSession(sessionId)
     } catch (err) {
-      this.logger.info(`[dsh-yashiro] 挂载 workspace 失败（不影响对话）：${describe(err)}`)
+      this.logger.info(`[dsh-yashiro] 挂载 workspace 失败（不影响对话）：${describeError(err)}`)
     }
   }
 
-  /** 拿到（或建立）这个 QQ 会话对应的 agent */
   async getOrCreate(
     scope: 'group' | 'c2c',
     peerId: string,
@@ -147,7 +134,7 @@ export class SessionManager {
 
     const agentOptions = this.resolveAgentOptions()
 
-    // 1) 已经在 live registry 里（例如插件热重载后），直接复用 —— 但没有拆除权
+    // 已经在 live registry 里（例如插件热重载后），复用即可 —— 但没有拆除权
     const live = this.ctx.agents.get(sessionId)
     if (live) {
       this.sessions.set(key, { agent: live, dispose: async () => {} })
@@ -156,7 +143,7 @@ export class SessionManager {
       return live
     }
 
-    // 2) 磁盘上有历史会话 → resume
+    // 磁盘上有历史会话就 resume；没有（或 resume 失败）再新建
     let handle: AgentHandle | undefined
     try {
       handle = await this.ctx.agents.resume({
@@ -169,7 +156,6 @@ export class SessionManager {
       handle = undefined
     }
 
-    // 3) 全新会话
     if (!handle) {
       handle = await this.ctx.agents.create({
         sessionId,
@@ -193,8 +179,4 @@ export class SessionManager {
     this.targets.clear()
     await Promise.all(entries.map((e) => e.dispose().catch(() => {})))
   }
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? `${err.name}: ${err.message}` : String(err)
 }

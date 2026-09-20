@@ -21,7 +21,8 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "selfcheck": "node scripts/selfcheck.mjs",
+    "test": "pnpm typecheck && pnpm build && node --test \"test/**/*.test.mjs\"",
+    "test:only": "node --test \"test/**/*.test.mjs\"",
     "dump-session": "node scripts/dump-session.mjs"
   },
   "keywords": [
