@@ -7,6 +7,9 @@
  *   node scripts/dump-session.mjs <sessionId>     # 指定 sessionId
  *   node scripts/dump-session.mjs --all           # 只列出该 workspace 下的会话
  *
+ * 每行带相对会话起点的耗时（+12.3s），相邻事件间隔超过 1.2s 会在行尾标出来，
+ * 并在末尾打印整场统计与最慢的几步 —— 「为什么这么慢」看这个就够了。
+ *
  * ⚠️ 坑：session.v3.jsonl.zstd 是**多个独立 zstd 帧拼接**的（每个 durable
  * append 批次一帧）。`zstdDecompressSync` 一次性解压只会拿到第一帧，看起来
  * 就像「只有一条 session 头事件」。必须按魔数切帧逐帧解。
@@ -82,6 +85,86 @@ function summarize(ev) {
   }
 }
 
+/** 会话起点（毫秒）：createdAt 可能是毫秒数，也可能是 ISO 串 */
+function startedAt(events) {
+  const created = events[0]?.createdAt
+  const parsed = typeof created === 'number' ? created : Date.parse(created ?? '')
+  if (Number.isFinite(parsed)) return parsed
+  return events.find((ev) => typeof ev.time === 'number')?.time
+}
+
+/** 单行预览：压掉换行、超长截断 */
+function preview(text, limit = 160) {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
+  return flat.length > limit ? `${flat.slice(0, limit)}…` : flat
+}
+
+/**
+ * assistant/message 里有两样别处看不到的内容：模型的 reasoning，以及它写给
+ * 自己的普通输出（群友看不到，只有 qqbot_send 发出去的内容群友才看得到）。
+ */
+function blockPreviews(ev) {
+  if (ev.type !== 'assistant/message') return []
+  const lines = []
+  for (const block of ev.data?.message?.content ?? []) {
+    if (block.type === 'reasoning') lines.push(`🧠 ${preview(block.text)}`)
+    else if (block.type === 'text') lines.push(`💬 ${preview(block.text)}`)
+  }
+  return lines
+}
+
+/**
+ * 逐步耗时：模型时间 = step/start → assistant/message，工具时间 =
+ * tool/call → tool/result。回合慢几乎总是因为模型步数多，而不是工具慢。
+ */
+function collectSteps(events) {
+  const rows = []
+  let step = null
+  for (const ev of events) {
+    if (ev.type === 'step/start') {
+      step = { step: ev.data?.step, start: ev.time, model: 0, tool: 0, pending: undefined, names: [] }
+    }
+    if (step === null || typeof ev.time !== 'number') continue
+    if (ev.type === 'assistant/message') step.model = ev.time - step.start
+    else if (ev.type === 'tool/call') {
+      step.pending = ev.time
+      step.names.push(ev.data?.name)
+    } else if (ev.type === 'tool/result' && step.pending !== undefined) {
+      step.tool += ev.time - step.pending
+      step.pending = undefined
+    } else if (ev.type === 'step/end') {
+      step.total = ev.time - step.start
+      rows.push(step)
+      step = null
+    }
+  }
+  return rows
+}
+
+/** 整场统计：总耗时、步数、模型/工具累计、工具分布、最慢几步 */
+function statsLines(events, t0) {
+  const last = [...events].reverse().find((ev) => typeof ev.time === 'number')
+  if (t0 === undefined || last === undefined) return ['统计：该会话没有时间戳']
+  const rows = collectSteps(events)
+  const sum = (key) => rows.reduce((acc, row) => acc + (row[key] ?? 0), 0)
+  const byName = new Map()
+  for (const row of rows) for (const name of row.names) byName.set(name, (byName.get(name) ?? 0) + 1)
+  const models = rows.map((row) => row.model).sort((a, b) => a - b)
+  const slowest = [...rows].sort((a, b) => (b.total ?? 0) - (a.total ?? 0)).slice(0, 5)
+  return [
+    `统计：整场 ${((last.time - t0) / 1000).toFixed(1)}s｜步数 ${rows.length}｜` +
+      `模型累计 ${(sum('model') / 1000).toFixed(1)}s｜工具累计 ${(sum('tool') / 1000).toFixed(1)}s`,
+    models.length > 0
+      ? `      单步模型：中位 ${(models[Math.floor(models.length / 2)] / 1000).toFixed(1)}s｜` +
+        `最慢 ${(models.at(-1) / 1000).toFixed(1)}s`
+      : '',
+    `      工具：${byName.size > 0 ? [...byName].map(([n, c]) => `${n}×${c}`).join('、') : '无'}`,
+    slowest.length > 0
+      ? `      最慢几步：${slowest.map((row) => `step${row.step}=${((row.total ?? 0) / 1000).toFixed(1)}s`).join(' ')}`
+      : '',
+  ].filter(Boolean)
+}
+
 const args = process.argv.slice(2)
 const cwd = process.cwd()
 const bucket = join(homedir(), '.dsh', 'sessions', workspaceSlug(cwd))
@@ -108,13 +191,26 @@ if (candidates.length === 0) {
   process.exit(1)
 }
 
+/** 预览行的缩进：对齐到事件类型之后 */
+const PREVIEW_INDENT = ' '.repeat(24)
+
 for (const id of candidates) {
   const dir = join(bucket, id)
   const file = readdirSync(dir).find((f) => f.includes('jsonl'))
   if (!file) continue
   console.log(`\n===== ${id} (${file}) =====`)
-  for (const ev of decodeSessionLog(join(dir, file))) {
-    console.log(`[${ev.seq ?? '-'}] ${ev.type ?? '?'}  ${summarize(ev)}`)
+  const events = decodeSessionLog(join(dir, file))
+  const t0 = startedAt(events)
+  let prev = t0
+  for (const ev of events) {
+    const timed = typeof ev.time === 'number'
+    const gap = timed && prev !== undefined ? ev.time - prev : 0
+    if (timed) prev = ev.time
+    const rel = timed && t0 !== undefined ? `+${((ev.time - t0) / 1000).toFixed(1)}s` : '-'
+    const mark = gap > 3000 ? `  ⏱ +${(gap / 1000).toFixed(1)}s` : gap > 1200 ? `  +${(gap / 1000).toFixed(1)}s` : ''
+    console.log(`[${ev.seq ?? '-'}] ${rel.padStart(7)}  ${ev.type ?? '?'}  ${summarize(ev)}${mark}`)
+    for (const line of blockPreviews(ev)) console.log(`${PREVIEW_INDENT}${line}`)
   }
+  for (const line of statsLines(events, t0)) console.log(line)
   if (wanted) break
 }
