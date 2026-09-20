@@ -1,5 +1,5 @@
 /**
- * 会话指令：`/current`、`/new`、`/switch <ID>`、`/list [页数]`。
+ * 会话指令：`/current`、`/new`、`/switch <ID>`、`/list [页数]`、`/context`。
  *
  * 和 `/id` 一样由插件直接回复，不进 dsh、不消耗模型调用。解析与文案都是纯函数，
  * 落库/建会话这些副作用由 index.ts 处理。
@@ -10,13 +10,14 @@ export interface SessionCommandUsage {
   command: SessionCommandKind
 }
 
-export type SessionCommandKind = 'current' | 'new' | 'switch' | 'list'
+export type SessionCommandKind = 'current' | 'new' | 'switch' | 'list' | 'context'
 
 export type SessionCommand =
   | { kind: 'current' }
   | { kind: 'new' }
   | { kind: 'switch'; id: string }
   | { kind: 'list'; page: number }
+  | { kind: 'context' }
   | SessionCommandUsage
 
 /** 会话 ID 在群里只显示前 8 位（sha256 全长 64 位，粘进 QQ 不现实） */
@@ -58,6 +59,9 @@ export function parseSessionCommand(content: string): SessionCommand | undefined
   }
   if (name === '/new') {
     return parts.length === 1 ? { kind: 'new' } : { kind: 'usage', command: 'new' }
+  }
+  if (name === '/context') {
+    return parts.length === 1 ? { kind: 'context' } : { kind: 'usage', command: 'context' }
   }
   if (name === '/switch') {
     return parts.length === 2 && parts[1] !== undefined
@@ -112,7 +116,88 @@ export function buildUsageText(command: SessionCommandKind): string {
       return '用法：/switch <会话 ID>。用 /list 看有哪些会话。'
     case 'list':
       return '用法：/list [页数]，页数从 1 开始。'
+    case 'context':
+      return '/context 不接受参数。'
   }
+}
+
+/** `/context` 要显示的东西，来自 agent 侧的会话日志折叠 */
+export interface ContextLine {
+  sessionId: string
+  createdAt?: number
+  model?: string
+  /** 最近一次请求的上下文占用（含缓存命中部分） */
+  contextTokens?: number
+  contextWindow?: number
+  totalTokens?: number
+  cacheReadTokens?: number
+  lastActivityAt?: number
+  running: boolean
+  turns: number
+  steps: number
+  userMessages: number
+  toolCalls: number
+}
+
+/**
+ * `/context` 的文案。
+ *
+ * 上下文那一行刻意只显示「最近一次请求的提示词规模 / 窗口」，不显示累计值 ——
+ * 累计值多轮之后会远大于窗口，看起来像超额了。
+ */
+export function buildContextText(info: ContextLine, formatTime: (ts: number) => string): string {
+  const lines = ['会话上下文', `Session ID: ${shortSessionId(info.sessionId)}`]
+  lines.push(
+    info.createdAt === undefined ? '创建：未知' : `创建：${formatTime(info.createdAt)}`,
+  )
+  lines.push(info.model === undefined ? '模型：未知（还没跑过回合）' : `模型：${info.model}`)
+
+  if (info.contextTokens === undefined) {
+    lines.push('上下文：还没跑过回合')
+  } else {
+    const used = formatTokens(info.contextTokens)
+    lines.push(
+      info.contextWindow === undefined
+        ? `上下文：${used}`
+        : `上下文：${used} / ${formatTokens(info.contextWindow)}（${percentOf(info.contextTokens, info.contextWindow)}）`,
+    )
+  }
+
+  if (info.totalTokens !== undefined) {
+    const cached = info.cacheReadTokens ?? 0
+    lines.push(
+      `累计用量：${formatTokens(info.totalTokens)}（缓存命中 ${formatTokens(cached)}，${percentOf(cached, info.totalTokens)}）`,
+    )
+  }
+
+  lines.push(
+    `历史：${info.turns} 轮 · ${info.steps} 步 · ${info.userMessages} 条你的消息 · ${info.toolCalls} 次工具调用`,
+  )
+  lines.push(
+    info.lastActivityAt === undefined
+      ? '最后活动：暂无'
+      : `最后活动：${formatTime(info.lastActivityAt)}${info.running ? '（正在跑回合）' : ''}`,
+  )
+  return lines.join('\n')
+}
+
+/** 1000 → `1k`，1500000 → `1.5m`；小于 1000 原样 */
+export function formatTokens(count: number): string {
+  const value = Math.max(0, Math.round(count))
+  if (value < 1000) return String(value)
+  if (value < 1_000_000) return `${trimZero(value / 1000)}k`
+  return `${trimZero(value / 1_000_000)}m`
+}
+
+function percentOf(part: number, whole: number): string {
+  if (!Number.isFinite(whole) || whole <= 0) return '—'
+  const ratio = part / whole
+  // 别把 99.6% 四舍五入成「100%」——那看起来像完全命中，是错的
+  if (ratio < 1) return `${Math.min(99, Math.round(ratio * 100))}%`
+  return `${Math.round(ratio * 100)}%`
+}
+function trimZero(value: number): string {
+  return value.toFixed(1).replace(/\.0$/, '')
 }
 
 export function buildCurrentText(ctx: SessionCommandContext): string {

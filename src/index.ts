@@ -11,6 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
+import { summarizeSessionLog, type SessionLogLike } from './agent/context-info.js'
 import { DEFAULT_SYSTEM_PROMPT } from './agent/prompt.js'
 import { SessionManager } from './agent/sessions.js'
 import { createAgentTools } from './agent/tools.js'
@@ -22,6 +23,7 @@ import { ApprovalChannel, type ApprovalContext } from './qq/approval.js'
 import { YashiroGateway } from './qq/gateway.js'
 import { buildUserText } from './qq/message-text.js'
 import {
+  buildContextText,
   buildCurrentText,
   buildListText,
   buildNewSessionText,
@@ -164,6 +166,29 @@ export function apply(ctx: Context, config: Config): void {
     return store.getCurrentSession(config.appId, scope, peerId)
   }
 
+  /**
+   * 折叠这条会话的日志，拼出 `/context` 的回复。
+   *
+   * 连不上会话（比如文件被删了）不当成致命错误：回一句说明，当前会话指针不动。
+   */
+  async function buildContextReply(
+    scope: 'group' | 'c2c',
+    peerId: string,
+    sessionId: string,
+  ): Promise<string> {
+    const agent = await sessions.select(scope, peerId, sessionId, buildSetup(scope, peerId))
+    if (agent === undefined) {
+      return `会话 ${shortSessionId(sessionId)} 连不上（会话文件可能被删了）。`
+    }
+    try {
+      const summary = summarizeSessionLog((agent as unknown as { session: SessionLogLike }).session)
+      return buildContextText({ sessionId, ...summary }, formatTime)
+    } catch (err) {
+      logger.warn(`[dsh-yashiro] 读取会话日志失败：${describeError(err)}`)
+      return '读这条会话的日志失败，详情见插件日志。'
+    }
+  }
+
   /** 把一个绑定行翻成展示用的会话行 */
   function toLine(session: SessionBinding, current: SessionBinding | undefined): SessionLine {
     return {
@@ -211,6 +236,16 @@ export function apply(ctx: Context, config: Config): void {
 
     if (command.kind === 'current') {
       await reply(buildCurrentText(sessionContext(scope, peerId)))
+      return true
+    }
+
+    if (command.kind === 'context') {
+      const current = currentOf(scope, peerId)
+      if (current === undefined) {
+        await reply(NO_SESSION_TEXT)
+        return true
+      }
+      await reply(await buildContextReply(scope, peerId, current.sessionId))
       return true
     }
 
