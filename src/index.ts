@@ -207,14 +207,16 @@ export function apply(ctx: Context, config: Config): void {
     try {
       logger.debug(`[trace] 准备建立/复用会话 peer=${msg.peerId}`)
       const agent = await sessions.getOrCreate(msg.scope, msg.peerId, buildSetup(msg.scope, msg.peerId))
-      logger.debug(`[trace] 会话就绪 session=${String(agent.id)}，准备 followup`)
-      agent.followup(
-        createUserMessage({
-          content: [{ type: 'text', text: buildUserText(msg, { newSinceLastWake }) }],
-          source: { kind: 'plugin', plugin: PLUGIN_ID },
-        }),
-      )
-      logger.debug('[trace] followup 已提交')
+      logger.debug(`[trace] 会话就绪 session=${String(agent.id)}，准备投递`)
+      const message = createUserMessage({
+        content: [{ type: 'text', text: buildUserText(msg, { newSinceLastWake }) }],
+        source: { kind: 'plugin', plugin: PLUGIN_ID },
+      })
+      // 默认插队：它正在跑回合时，这条消息在下一个 step 边界就被看到；
+      // 配成 queue 则排队等下一个回合，第一条回复完全不受影响。
+      if (config.busyDelivery === 'queue') agent.followup(message)
+      else agent.steer(message)
+      logger.debug(`[trace] ${config.busyDelivery} 已提交`)
       lastWakeAt.set(dedupeKey, Date.parse(msg.timestamp) || Date.now())
       logger.info(
         `[dsh-yashiro] 已唤醒 agent：session=${String(agent.id).slice(0, 12)}… peer=${msg.peerId}`,

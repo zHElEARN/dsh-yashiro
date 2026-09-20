@@ -3,6 +3,7 @@ import { stripMentionMarkers, chunkText, normalizeInbound } from '../dist/gatewa
 import { formatTime, platformNowIso } from '../dist/time.js'
 import { buildIdReply, decideAccess, isIdCommand } from '../dist/access.js'
 import { buildUserText } from '../dist/message-text.js'
+import { Config } from '../dist/config.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rmSync } from 'node:fs'
@@ -203,6 +204,13 @@ store.close()
 rmSync(dbPath, { force: true })
 rmSync(`${dbPath}-wal`, { force: true })
 rmSync(`${dbPath}-shm`, { force: true })
+
+console.log('— Config —')
+check('busyDelivery 默认插队', Config({ appId: 'x', appSecret: 'y' }).busyDelivery === 'steer')
+check('busyDelivery 可切成排队', Config({ appId: 'x', appSecret: 'y', busyDelivery: 'queue' }).busyDelivery === 'queue')
+check('busyDelivery 拒绝非法值', (() => {
+  try { Config({ appId: 'x', appSecret: 'y', busyDelivery: 'nope' }); return false } catch { return true }
+})())
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`)
 process.exit(fail === 0 ? 0 : 1)

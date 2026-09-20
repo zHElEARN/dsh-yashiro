@@ -52,6 +52,14 @@ export interface Config {
   /** 群聊 @ 时，附带告诉 agent「自你上次发言以来还有几条新消息」 */
   announceNewMessageCount: boolean
   /**
+   * agent 正在跑回合时，新 @ 进来的消息怎么投递：
+   * - `steer`（默认）插队 —— 在当前回合的下一个 step 边界就被看到，回复能带上这条新消息；
+   * - `queue` 排队 —— 等当前回合结束，作为下一个回合的普通消息处理，第一条回复不受影响。
+   *
+   * 两种都不会丢消息；agent 空闲时 `steer` 等价于直接开一个新回合。
+   */
+  busyDelivery: 'steer' | 'queue'
+  /**
    * 触发 agent 的系统提示词片段。留空用内置默认值（见 prompt.ts）。
    * 这是 agent 知道「必须用 qqbot_send 回复」的唯一途径，谨慎修改。
    */
@@ -73,6 +81,7 @@ export const Config: Schema<Config> = Schema.object({
   historyMaxLimit: Schema.number().default(200),
   sendChunkLimit: Schema.number().default(4500),
   announceNewMessageCount: Schema.boolean().default(true),
+  busyDelivery: Schema.union([Schema.const('steer'), Schema.const('queue')]).default('steer'),
   systemPrompt: Schema.string(),
   debug: Schema.boolean().default(false),
 })

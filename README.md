@@ -11,7 +11,7 @@ QQ 群消息 ──▶ 归一化 ──▶ 历史库（全部入库）
                             │
                             ├─ 没 @ 机器人 ──▶ 到此为止（不进上下文）
                             │
-                            └─ @ 了机器人 ──▶ followup() 唤醒 agent 回合
+                            └─ @ 了机器人 ──▶ steer()/followup() 唤醒 agent 回合
                                                     │
                     ┌───────────────────────────────┘
                     ▼
@@ -32,6 +32,7 @@ QQ 群消息 ──▶ 归一化 ──▶ 历史库（全部入库）
 | **附件的所有信息都带给 agent，但插件不下载、不持久化** | 既然 agent 已经独立自主，附图怎么看由它自己决定 |
 | **不做斜杠命令 / 不做上下文压缩 / 不做多会话切换** | v1 范围；extension 点见下 |
 | **`/new` 之类先不做** | agent 忘了调工具就没人管，靠 system prompt 强约束 |
+| **新 @ 默认插队（`busyDelivery: steer`）** | 群里连发两条时第二条不该干等；插队在下一个 step 边界注入，回复能带上新消息。想要旧行为配 `queue` |
 
 ## 实测记录（2026-09-20）
 
@@ -100,6 +101,7 @@ dsh --profile yashiro
 | `historyDefaultLimit` / `historyMaxLimit` | `30` / `200` | 单次查询条数 |
 | `sendChunkLimit` | `4500` | 单条消息最大字符数，超出自动切分 |
 | `announceNewMessageCount` | `true` | @ 时附带「你不在时群里又聊了几条」 |
+| `busyDelivery` | `'steer'` | 它正在跑回合时新 @ 进来的消息：`steer` 插队（下个 step 就被看到）／`queue` 排队（等下一个回合） |
 | `systemPrompt` | 内置 | 覆盖注入的系统提示词 |
 | `debug` | `false` | 打开后写 DEBUG 级文件日志 |
 
