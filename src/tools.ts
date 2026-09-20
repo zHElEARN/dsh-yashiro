@@ -12,6 +12,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Config } from './config.js'
 import type { YashiroGateway } from './gateway.js'
 import type { HistoryStore } from './store.js'
+import { describeAttachment } from './message-text.js'
 import { formatTime, platformNowIso } from './time.js'
 
 export interface ToolDeps {

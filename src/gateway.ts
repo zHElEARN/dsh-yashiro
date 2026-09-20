@@ -15,7 +15,7 @@ import type { InboundMessage } from '@tencent-connect/qqbot-nodejs'
 import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol'
 
 import type { Config } from './config.js'
-import type { StoredMessage } from './store.js'
+import type { AttachmentInfo, StoredMessage } from './store.js'
 
 /** 群全量消息的 intent 位。官方文档写 1<<25 就够，实测需要额外带上这一位。 */
 const GROUP_MESSAGE_INTENT = 1 << 24
@@ -30,11 +30,23 @@ interface MentionLike {
   username?: string
 }
 
+/** 平台给的原始附件结构 */
+interface RawAttachmentLike {
+  content_type?: string
+  url?: string
+  filename?: string
+  size?: number
+  width?: number
+  height?: number
+  asr_refer_text?: string
+  voice_wav_url?: string
+}
+
 /** `msg_elements` 数组元素 */
 interface MsgElementLike {
   content?: string
   message_type?: number
-  attachments?: Array<Record<string, unknown>>
+  attachments?: RawAttachmentLike[]
 }
 
 /** 从 content 里剥掉 `<@OPENID>` / `<@!OPENID>` 标记 */
@@ -55,6 +67,21 @@ export function isBotMentioned(msg: InboundMessage): boolean {
   return false
 }
 
+/** 原始附件 → 我们的附件结构（只搬运元信息，不下载） */
+function toAttachmentInfo(raw: RawAttachmentLike, from: 'current' | 'quoted'): AttachmentInfo {
+  return {
+    contentType: raw.content_type ? String(raw.content_type) : 'unknown',
+    from,
+    ...(raw.url ? { url: String(raw.url) } : {}),
+    ...(raw.filename ? { filename: String(raw.filename) } : {}),
+    ...(typeof raw.size === 'number' ? { size: raw.size } : {}),
+    ...(typeof raw.width === 'number' ? { width: raw.width } : {}),
+    ...(typeof raw.height === 'number' ? { height: raw.height } : {}),
+    ...(raw.asr_refer_text ? { asrText: String(raw.asr_refer_text) } : {}),
+    ...(raw.voice_wav_url ? { voiceWavUrl: String(raw.voice_wav_url) } : {}),
+  }
+}
+
 /** 把 SDK 归一化后的入站消息转成我们要存的一条记录 */
 export function normalizeInbound(appId: string, msg: InboundMessage): StoredMessage | null {
   const scope: 'group' | 'c2c' = msg.kind === 'c2c' ? 'c2c' : 'group'
@@ -64,9 +91,19 @@ export function normalizeInbound(appId: string, msg: InboundMessage): StoredMess
   if (!peerId) return null
 
   const elements = (msg as unknown as { msgElements?: MsgElementLike[] }).msgElements
-  const quoted = elements?.[0]?.content
+  const quotedElement = elements?.[0]
+  const quoted = quotedElement?.content
 
-  const attachments = (msg.attachments ?? []) as unknown as Array<Record<string, unknown>>
+  // 附件有两个来源，都要带上：
+  //   - 当前这条消息自带的（msg.attachments）
+  //   - 被引用那条消息带的（msg.msgElements[0].attachments）
+  // 引用一张纯图片时，被引用消息没有文字，附件全在后者 —— 这正是之前漏掉的那条路径。
+  const ownAttachments = (msg.attachments ?? []) as unknown as RawAttachmentLike[]
+  const quotedAttachments = quotedElement?.attachments ?? []
+  const attachments: AttachmentInfo[] = [
+    ...ownAttachments.map((a) => toAttachmentInfo(a, 'current')),
+    ...quotedAttachments.map((a) => toAttachmentInfo(a, 'quoted')),
+  ]
 
   return {
     appId,

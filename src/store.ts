@@ -14,6 +14,29 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
+/**
+ * 附件元数据。
+ *
+ * 插件**只记录平台给的元信息，不下载文件、不做持久化** ——
+ * 图片怎么看、什么时候下，全交给 agent 自己决定（QQ 的 URL 带时效，过期就算了）。
+ * `from` 区分这份附件挂在哪条消息上：当前这条，还是被引用的那条。
+ */
+export interface AttachmentInfo {
+  /** 平台给的 MIME 类型：image/jpeg、voice、video/mp4、file 等 */
+  contentType: string
+  /** 附件挂在当前消息上还是被引用的消息上 */
+  from: 'current' | 'quoted'
+  url?: string
+  filename?: string
+  size?: number
+  width?: number
+  height?: number
+  /** 语音消息的平台转写文本（有的话直接用，不用下载） */
+  asrText?: string
+  /** 语音消息平台转码后的 WAV URL */
+  voiceWavUrl?: string
+}
+
 /** 一条被记录下来的群/单聊消息 */
 export interface StoredMessage {
   appId: string
@@ -33,8 +56,8 @@ export interface StoredMessage {
   mentionsBot: boolean
   /** 被引用消息的内容（QQ 引用消息时平台会带上） */
   quotedContent?: string
-  /** 附件元数据（不下载文件，只留 URL 和类型） */
-  attachments?: Array<Record<string, unknown>>
+  /** 附件元数据（当前消息的 + 被引用消息的，靠 `from` 区分） */
+  attachments?: AttachmentInfo[]
   /** 原始事件类型 */
   rawEventType: string
   /** 平台时间戳（RFC3339） */
@@ -225,10 +248,10 @@ export class HistoryStore {
 }
 
 function toHistoryRow(row: Record<string, unknown>): HistoryRow {
-  let attachments: Array<Record<string, unknown>> | undefined
+  let attachments: AttachmentInfo[] | undefined
   if (typeof row.attachments === 'string' && row.attachments.length > 0) {
     try {
-      attachments = JSON.parse(row.attachments) as Array<Record<string, unknown>>
+      attachments = JSON.parse(row.attachments) as AttachmentInfo[]
     } catch {
       attachments = undefined
     }

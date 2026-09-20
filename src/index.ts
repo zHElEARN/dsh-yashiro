@@ -26,6 +26,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { buildIdReply, decideAccess, ID_COMMAND, isIdCommand } from './access.js'
 import { Config } from './config.js'
 import { YashiroGateway } from './gateway.js'
+import { buildUserText } from './message-text.js'
 import { DEFAULT_SYSTEM_PROMPT, renderSystemPrompt } from './prompt.js'
 import { SessionManager } from './sessions.js'
 import { defaultHistoryDbPath, HistoryStore, type StoredMessage } from './store.js'
@@ -113,20 +114,6 @@ export function apply(ctx: Context, config: Config): void {
         text: renderSystemPrompt(promptTemplate, { scope, peerId }),
       })
     }
-  }
-
-  /** 组装这条 @ 消息送进 agent 的正文 */
-  function buildUserText(msg: StoredMessage, newSinceLastWake: number | undefined): string {
-    const where = msg.scope === 'group' ? '群里' : '单聊里'
-    const who = msg.senderName ?? msg.senderId
-    const lines = [`${who} 在${where} @ 了你：`, '', msg.content]
-    if (msg.quotedContent) {
-      lines.push('', `（引用了：${msg.quotedContent}）`)
-    }
-    if (newSinceLastWake !== undefined && newSinceLastWake > 0) {
-      lines.push('', `（自你上次开口以来，群里还有 ${newSinceLastWake} 条新消息。需要的话用 qqbot_history 查。）`)
-    }
-    return lines.join('\n')
   }
 
   /** 机器人自己发出的消息也记一笔，保持「历史里能看到双方说过的话」 */
@@ -223,7 +210,7 @@ export function apply(ctx: Context, config: Config): void {
       logger.debug(`[trace] 会话就绪 session=${String(agent.id)}，准备 followup`)
       agent.followup(
         createUserMessage({
-          content: [{ type: 'text', text: buildUserText(msg, newSinceLastWake) }],
+          content: [{ type: 'text', text: buildUserText(msg, { newSinceLastWake }) }],
           source: { kind: 'plugin', plugin: PLUGIN_ID },
         }),
       )

@@ -2,6 +2,7 @@ import { HistoryStore } from '../dist/store.js'
 import { stripMentionMarkers, chunkText, normalizeInbound } from '../dist/gateway.js'
 import { formatTime, platformNowIso } from '../dist/time.js'
 import { buildIdReply, decideAccess, isIdCommand } from '../dist/access.js'
+import { buildUserText } from '../dist/message-text.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rmSync } from 'node:fs'
@@ -51,6 +52,68 @@ const chunks = chunkText(many, 200)
 check('长文本被切分', chunks.length > 1)
 check('切分后无超长', chunks.every((c) => c.length <= 200), chunks.map(c => c.length).join(','))
 check('切分后内容无损', chunks.join('\n').replace(/\s/g, '') === many.replace(/\s/g, ''))
+
+console.log('— 附件传递（回归：引用图片时附件必须送到 agent 面前）—')
+{
+  // 场景：引用一张纯图片再 @ 机器人。被引用消息没有文字，附件挂在 msgElements[0] 上。
+  const quotedImage = {
+    rawEventType: 'GROUP_MESSAGE_CREATE', kind: 'group',
+    senderId: 'U1', senderName: 'Zhe_Learn',
+    content: ' <@BOT> 你看一下这张图看看是啥',
+    messageId: 'm-img', timestamp: '2026-09-20T19:22:59+08:00',
+    groupOpenid: 'G1',
+    mentions: [{ is_you: true }],
+    msgElements: [{
+      content: '',
+      message_type: 0,
+      attachments: [{
+        content_type: 'image/jpeg', url: 'https://multimedia.nt.qq.com.cn/download?fileid=abc',
+        filename: 'cat.jpg', width: 1206, height: 2622, size: 1363148,
+      }],
+    }],
+  }
+  const msg = normalizeInbound('app', quotedImage)
+  check('引用图片 → 附件被抓到', msg.attachments?.length === 1, JSON.stringify(msg.attachments))
+  check('附件标记来源为 quoted', msg.attachments?.[0]?.from === 'quoted')
+  check('附件带 URL', String(msg.attachments?.[0]?.url).includes('multimedia.nt.qq.com.cn'))
+  check('附件带尺寸', msg.attachments?.[0]?.width === 1206 && msg.attachments?.[0]?.height === 2622)
+
+  const text = buildUserText(msg)
+  check('正文含被引用附件标题', text.includes('被引用的那条消息带附件'), text)
+  check('正文含图片 URL', text.includes('https://multimedia.nt.qq.com.cn/download?fileid=abc'))
+  check('正文标明是图片', text.includes('图片 cat.jpg 1206x2622'))
+  // 场景：只发图 + @，一个字都不打（剥掉 @ 标记后正文为空）
+  const noText = normalizeInbound('app', { ...quotedImage, content: ' <@BOT>  ' })
+  check('剥掉 @ 后正文为空', noText.content === '', JSON.stringify(noText.content))
+  check('空正文有占位', buildUserText(noText).includes('没有文字内容'))
+
+  // 场景：直接把图跟 @ 一起发
+  const ownImage = { ...quotedImage, content: ' <@BOT> 看这个', msgElements: undefined,
+    attachments: [{ content_type: 'image/png', url: 'https://example.com/a.png', size: 2048 }] }
+  const own = normalizeInbound('app', ownImage)
+  check('直接附图 → from=current', own.attachments?.[0]?.from === 'current')
+  check('正文含当前消息附件', buildUserText(own).includes('这条消息带附件'))
+  check('小文件格式化', buildUserText(own).includes('2.0KB'))
+
+  // 场景：语音带平台转写
+  const voice = { ...quotedImage, msgElements: undefined,
+    attachments: [{ content_type: 'voice', url: 'https://example.com/v.silk', asr_refer_text: '今天天气不错' }] }
+  const v = normalizeInbound('app', voice)
+  check('语音转写被抓到', v.attachments?.[0]?.asrText === '今天天气不错')
+  check('正文含转写文本', buildUserText(v).includes('平台转写文本: 今天天气不错'))
+  check('正文含语音 URL', buildUserText(v).includes('https://example.com/v.silk'))
+
+  // 场景：两处附件同时存在
+  const both = normalizeInbound('app', { ...quotedImage, attachments: [{ content_type: 'file', url: 'https://example.com/f.pdf' }] })
+  check('两处附件都在', both.attachments?.length === 2)
+  const bt = buildUserText(both)
+  check('正文同时出现两种来源', bt.includes('被引用的那条消息带附件') && bt.includes('这条消息带附件'))
+
+  // 场景：纯文本不该受影响
+  const plain = normalizeInbound('app', { ...quotedImage, msgElements: undefined, attachments: undefined })
+  check('纯文本无附件', plain.attachments === undefined)
+  check('纯文本正文不含附件标题', !buildUserText(plain).includes('带附件'))
+}
 
 console.log('— 访问控制 —')
 {
