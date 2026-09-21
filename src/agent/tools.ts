@@ -3,12 +3,14 @@
  *
  * 它们通过闭包绑定到这个 agent 所属的群/单聊，agent 不能指定目标 —— 免得它发错群。
  */
+import { resolve } from 'node:path'
+
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { Config } from '../core/config.js'
 import { formatTime } from '../core/time.js'
 import type { YashiroGateway } from '../qq/gateway.js'
-import { describeAttachment } from '../qq/message-text.js'
+import { describeAttachment, formatSize } from '../qq/message-text.js'
 import type { HistoryStore } from '../store.js'
 
 export interface ToolDeps {
@@ -158,6 +160,59 @@ export function createSendTool(deps: ToolDeps) {
   })
 }
 
+export function createSendFileTool(deps: ToolDeps) {
+  const { gateway, store, config, scope, peerId } = deps
+  return defineTool({
+    name: 'qqbot_send_file',
+    description:
+      '把一个本地文件发送到当前 QQ 群或单聊。图片/视频/语音按扩展名自动识别，认不出的当普通文件发。',
+    parameters: {
+      file_path: {
+        type: 'string',
+        required: true,
+        description: '要发送的文件的路径。文件必须已经存在于磁盘上。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          fileName: { type: 'string', required: true, description: '文件名' },
+          fileSize: { type: 'integer', required: true, description: '字节数' },
+          kind: {
+            type: 'string',
+            required: true,
+            description: '实际用的发送类型：image / video / voice / file',
+          },
+        },
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `已发送 ${value.fileName}（${formatSize(value.fileSize)}）到${scope === 'group' ? '群里' : '单聊'}。`,
+        },
+      ],
+    },
+    async execute(args) {
+      const raw = args.file_path.trim()
+      if (raw.length === 0) throw new Error('file_path 不能为空')
+      // 相对路径按 agent 的工作目录解析，与 SessionManager 给 agent 的 cwd 一致
+      const abs = resolve(config.cwd?.trim() || process.cwd(), raw)
+
+      const sent = await gateway.sendFile(scope, peerId, abs)
+      // 和 qqbot_send 一样落库：agent 事后翻历史时才知道自己发过什么
+      store.appendOutbound(
+        config.appId,
+        scope,
+        peerId,
+        `[文件] ${sent.fileName}（${formatSize(sent.fileSize)}）`,
+      )
+      return sent
+    },
+  })
+}
+
 export function createAgentTools(deps: ToolDeps) {
-  return [createHistoryTool(deps), createSendTool(deps)]
+  return [createHistoryTool(deps), createSendTool(deps), createSendFileTool(deps)]
 }

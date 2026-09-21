@@ -5,13 +5,17 @@
  * 不能看事件名）；`content` 里的 `<@OPENID>` 标记平台不会剥；`msg_elements[0]` 才是被引用
  * 那条消息。没开全量模式的群只会推 `GROUP_AT_MESSAGE_CREATE`，两种事件名都要认。
  */
-import { QQBot } from '@tencent-connect/qqbot-nodejs'
+import { statSync } from 'node:fs'
+import { basename, extname } from 'node:path'
+
+import { MediaFileType, QQBot, getMaxUploadSize } from '@tencent-connect/qqbot-nodejs'
 import type { InboundMessage } from '@tencent-connect/qqbot-nodejs'
 import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs'
 import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol'
 
 import type { Config } from '../core/config.js'
 import type { AttachmentInfo, StoredMessage } from '../store.js'
+import { formatSize } from './message-text.js'
 
 /** 官方文档说 GROUP_MESSAGE (1<<25) 就够，但收非 @ 消息必须额外带上这一位 */
 const GROUP_MESSAGE_INTENT = 1 << 24
@@ -20,6 +24,73 @@ const SANDBOX_BASE_URL = 'https://sandbox.api.sgroup.qq.com'
 
 /** 单条消息最大字符数，超出自动切分 */
 const SEND_CHUNK_LIMIT = 4500
+
+/** 发送文件时按扩展名选的富媒体类型 */
+export type MediaKind = 'image' | 'video' | 'voice' | 'file'
+
+const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'])
+const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm'])
+const VOICE_EXTS = new Set(['.mp3', '.wav', '.ogg', '.aac', '.silk', '.amr'])
+
+/** 发送文件时对外报的类型名，用于错误文案 */
+const MEDIA_KIND_LABEL: Record<MediaKind, string> = {
+  image: '图片',
+  video: '视频',
+  voice: '语音',
+  file: '文件',
+}
+
+const MEDIA_FILE_TYPE: Record<MediaKind, MediaFileType> = {
+  image: MediaFileType.IMAGE,
+  video: MediaFileType.VIDEO,
+  voice: MediaFileType.VOICE,
+  file: MediaFileType.FILE,
+}
+
+/** 按扩展名决定发成图片/视频/语音还是普通文件；认不出的一律当普通文件 */
+export function classifyMedia(filePath: string): MediaKind {
+  const ext = extname(filePath).toLowerCase()
+  if (IMAGE_EXTS.has(ext)) return 'image'
+  if (VIDEO_EXTS.has(ext)) return 'video'
+  if (VOICE_EXTS.has(ext)) return 'voice'
+  return 'file'
+}
+
+/** 发送一个文件后回报给调用方的东西 */
+export interface SentFile {
+  kind: MediaKind
+  fileName: string
+  fileSize: number
+}
+
+/**
+ * 校验待发送的文件并定出类型：存在、是普通文件、不超平台对该类型的上限。
+ *
+ * 和真正发送拆开是为了可测 —— 构造 YashiroGateway 需要真的连 QQ。
+ */
+export function inspectFileForSend(localPath: string): SentFile {
+  const fileName = basename(localPath)
+  let fileSize: number
+  try {
+    const info = statSync(localPath)
+    if (!info.isFile()) throw new Error('不是一个普通文件')
+    fileSize = info.size
+  } catch (err) {
+    throw new Error(
+      `读不到文件 ${localPath}：${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+
+  const kind = classifyMedia(localPath)
+  const maxSize = getMaxUploadSize(MEDIA_FILE_TYPE[kind])
+  if (fileSize > maxSize) {
+    throw new Error(
+      `${fileName} 有 ${formatSize(fileSize)}，超过 QQ 对${MEDIA_KIND_LABEL[kind]}的 ${formatSize(maxSize)} 上限`,
+    )
+  }
+
+  return { kind, fileName, fileSize }
+}
 
 interface MentionLike {
   is_you?: boolean
@@ -233,6 +304,29 @@ export class YashiroGateway {
       sent += 1
     }
     return sent
+  }
+
+  /**
+   * 发送本地文件，按扩展名分发到图片/视频/语音/普通文件。和 send() 一样不绑 msg_id
+   * （主动推送），所以不受被动回复时效约束。
+   *
+   * 路径不做白名单限制 —— agent 本来就跑在宿主的文件沙箱里，这里不再叠一层；代价是
+   * 这个工具能读到什么就能发出去什么（见 README「设计取舍」）。
+   *
+   * 通用文件消息需要机器人有「文件消息」权限，没有的话平台会拒绝，错误原样上抛给 agent。
+   */
+  async sendFile(scope: 'group' | 'c2c', targetId: string, localPath: string): Promise<SentFile> {
+    const inspected = inspectFileForSend(localPath)
+    const { kind, fileName } = inspected
+
+    const target = { scope, targetId }
+    const source = { localPath }
+    if (kind === 'image') await this.bot.sendImage(target, source)
+    else if (kind === 'video') await this.bot.sendVideo(target, source)
+    else if (kind === 'voice') await this.bot.sendVoice(target, source)
+    else await this.bot.sendFile(target, source, { fileName })
+
+    return inspected
   }
 }
 

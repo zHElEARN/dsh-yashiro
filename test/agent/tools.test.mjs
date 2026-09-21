@@ -8,6 +8,7 @@ import { HistoryStore } from '../../dist/store.js'
 import {
   createAgentTools,
   createHistoryTool,
+  createSendFileTool,
   createSendTool,
   HISTORY_DEFAULT_LIMIT,
   HISTORY_MAX_LIMIT,
@@ -60,10 +61,15 @@ for (let i = 0; i < HISTORY_MAX_LIMIT; i += 1) {
 
 const config = { appId: APP }
 const sent = []
+const sentFiles = []
 const gateway = {
   async send(scope, peerId, text) {
     sent.push({ scope, peerId, text })
     return 1
+  },
+  async sendFile(scope, peerId, localPath) {
+    sentFiles.push({ scope, peerId, localPath })
+    return { kind: 'file', fileName: 'report.pdf', fileSize: 2048 }
   },
 }
 const deps = { store, gateway, config, scope: 'group', peerId: 'G1' }
@@ -119,11 +125,62 @@ describe('qqbot_send', () => {
   })
 })
 
+describe('qqbot_send_file', () => {
+  it('发出去并把出站记录也落库', async () => {
+    sentFiles.length = 0
+    const result = await createSendFileTool(deps).execute({ file_path: '/tmp/report.pdf' }, {})
+    assert.deepEqual(result, { kind: 'file', fileName: 'report.pdf', fileSize: 2048 })
+    assert.deepEqual(sentFiles, [{ scope: 'group', peerId: 'G1', localPath: '/tmp/report.pdf' }])
+
+    const last = store.recent(APP, 'G1', 1).at(-1)
+    assert.equal(last?.content, '[文件] report.pdf（2.0KB）')
+    assert.equal(last?.rawEventType, 'OUTBOUND')
+  })
+
+  it('绝对路径原样透传', async () => {
+    sentFiles.length = 0
+    await createSendFileTool(deps).execute({ file_path: '/var/tmp/a.png' }, {})
+    assert.equal(sentFiles[0].localPath, '/var/tmp/a.png')
+  })
+
+  it('相对路径按 agent 工作目录解析', async () => {
+    sentFiles.length = 0
+    const scoped = { ...deps, config: { ...config, cwd: '/tmp/ws' } }
+    await createSendFileTool(scoped).execute({ file_path: 'out/chart.png' }, {})
+    assert.equal(sentFiles[0].localPath, '/tmp/ws/out/chart.png')
+  })
+
+  it('空路径被拒', async () => {
+    await assert.rejects(
+      () => createSendFileTool(deps).execute({ file_path: '   ' }, {}),
+      /file_path 不能为空/,
+    )
+  })
+
+  it('发送失败时不落库', async () => {
+    const before = store.recent(APP, 'G1', 1).at(-1)?.seq
+    const failing = {
+      ...deps,
+      gateway: {
+        ...gateway,
+        async sendFile() {
+          throw new Error('平台拒绝：没有文件消息权限')
+        },
+      },
+    }
+    await assert.rejects(
+      () => createSendFileTool(failing).execute({ file_path: '/tmp/x.pdf' }, {}),
+      /没有文件消息权限/,
+    )
+    assert.equal(store.recent(APP, 'G1', 1).at(-1)?.seq, before)
+  })
+})
+
 describe('createAgentTools', () => {
-  it('一次给出两个工具', () => {
+  it('一次给出三个工具', () => {
     assert.deepEqual(
       createAgentTools(deps).map((tool) => tool.name),
-      ['qqbot_history', 'qqbot_send'],
+      ['qqbot_history', 'qqbot_send', 'qqbot_send_file'],
     )
   })
 })

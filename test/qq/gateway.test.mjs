@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
-import { describe, it } from 'node:test'
+import { describe, it, after } from 'node:test'
+import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { chunkText, normalizeInbound, stripMentionMarkers } from '../../dist/qq/gateway.js'
+import {
+  chunkText,
+  classifyMedia,
+  inspectFileForSend,
+  normalizeInbound,
+  stripMentionMarkers,
+} from '../../dist/qq/gateway.js'
 
 /** 实测到的真实 payload 形态（全量模式下 @ 消息也叫 GROUP_MESSAGE_CREATE） */
 const inbound = {
@@ -188,5 +197,72 @@ describe('附件传递', () => {
   it('纯文本无附件', () => {
     const plain = normalizeInbound('app', { ...quotedImage, msgElements: undefined, attachments: undefined })
     assert.equal(plain.attachments, undefined)
+  })
+})
+
+describe('classifyMedia', () => {
+  it('按扩展名分出图片/视频/语音', () => {
+    assert.equal(classifyMedia('chart.png'), 'image')
+    assert.equal(classifyMedia('clip.mp4'), 'video')
+    assert.equal(classifyMedia('note.silk'), 'voice')
+  })
+
+  it('大小写不敏感', () => {
+    assert.equal(classifyMedia('A.JPG'), 'image')
+    assert.equal(classifyMedia('B.MP4'), 'video')
+  })
+
+  it('认不出的一律当普通文件', () => {
+    assert.equal(classifyMedia('report.pdf'), 'file')
+    assert.equal(classifyMedia('archive.tar.gz'), 'file')
+    assert.equal(classifyMedia('noext'), 'file')
+    assert.equal(classifyMedia('.gitignore'), 'file')
+  })
+
+  it('目录名里的点不参与判断', () => {
+    assert.equal(classifyMedia('/tmp/a.b/c'), 'file')
+    assert.equal(classifyMedia('/tmp/a.b/c.png'), 'image')
+  })
+})
+
+describe('inspectFileForSend', () => {
+  const dir = join(tmpdir(), `yashiro-sendfile-${process.pid}-${Date.now()}`)
+  mkdirSync(dir, { recursive: true })
+  after(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('普通文件给出类型/文件名/大小', () => {
+    const path = join(dir, 'report.pdf')
+    writeFileSync(path, 'x'.repeat(2048))
+    assert.deepEqual(inspectFileForSend(path), {
+      kind: 'file',
+      fileName: 'report.pdf',
+      fileSize: 2048,
+    })
+  })
+
+  it('图片按 image 上报', () => {
+    const path = join(dir, 'chart.png')
+    writeFileSync(path, 'png')
+    assert.equal(inspectFileForSend(path).kind, 'image')
+  })
+
+  it('目录被拒', () => {
+    assert.throws(() => inspectFileForSend(dir), /不是一个普通文件/)
+  })
+
+  it('不存在的路径被拒', () => {
+    assert.throws(() => inspectFileForSend(join(dir, 'nope.txt')), /读不到文件/)
+  })
+
+  /**
+   * 超限用的是语音（20MB，四类里最小的那个）。用 ftruncate 造稀疏文件，
+   * 不占实际磁盘也不慢。
+   */
+  it('超过平台上限被拒', () => {
+    const path = join(dir, 'big.mp3')
+    const fd = openSync(path, 'w')
+    ftruncateSync(fd, 20 * 1024 * 1024 + 1)
+    closeSync(fd)
+    assert.throws(() => inspectFileForSend(path), /超过 QQ 对语音的 20\.0MB 上限/)
   })
 })
