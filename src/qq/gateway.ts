@@ -23,7 +23,7 @@ import type { Config } from "../core/config.js";
 import { describeError } from "../core/errors.js";
 import { formatSize } from "../core/format.js";
 import type { Logger } from "../core/logger.js";
-import type { PeerRef, Scope } from "../core/types.js";
+import type { MentionInfo, PeerRef, Scope } from "../core/types.js";
 import type { AttachmentInfo, StoredMessage } from "../store.js";
 
 /** 官方文档说 GROUP_MESSAGE (1<<25) 就够，但收非 @ 消息必须额外带上这一位 */
@@ -101,10 +101,14 @@ export function inspectFileForSend(localPath: string): SentFile {
   return { kind, fileName, fileSize };
 }
 
+/** 平台 `mentions[]` 的形状，字段名是下划线风格 */
 interface MentionLike {
+  scope?: "all" | "single";
   is_you?: boolean;
-  bot?: boolean;
   id?: string;
+  user_openid?: string;
+  member_openid?: string;
+  nickname?: string;
   username?: string;
 }
 
@@ -126,12 +130,53 @@ interface MsgElementLike {
   attachments?: RawAttachmentLike[];
 }
 
-/** 剥掉 `<@OPENID>` / `<@!OPENID>` */
-export function stripMentionMarkers(content: string): string {
-  return content
-    .replace(/<@!?[0-9A-Za-z_-]+>/g, " ")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
+/**
+ * 正文清洗：`<@OPENID>` 换成 `@昵称`，表情标记收敛成 `[表情]`。
+ *
+ * @ 一律保留（@机器人 和 @别人 都在），因为「@ 了谁」是对话信息的一部分；
+ * 名字取自 mentions，取不到就保留原始标记 —— 宁可不统一也不丢信息。
+ */
+export function formatContent(
+  content: string,
+  mentions?: MentionLike[],
+): string {
+  const names = new Map<string, string>();
+  for (const mention of mentions ?? []) {
+    const name = mention.nickname ?? mention.username;
+    if (name === undefined) continue;
+    for (const id of [mention.id, mention.member_openid, mention.user_openid]) {
+      if (id) names.set(id, name);
+    }
+  }
+
+  return (
+    content
+      // 补一个空格：@ 标记和后面的字可能贴在一起（`<@BOT>/id`），分开才认得出指令
+      .replace(/<@!?([0-9A-Za-z_-]+)>/g, (whole, id: string) => {
+        const name = names.get(id);
+        return name === undefined ? `${whole} ` : `@${name} `;
+      })
+      // 表情标记：新旧两种格式，和腾讯自己的 contentSanitizer 认的一致
+      .replace(/\[<face,id=\d+\/?>]/g, "[表情]")
+      .replace(/<faceType=\d+,faceId="[^"]*",ext="[^"]*">/g, "[表情]")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim()
+  );
+}
+
+/** 把平台的 `mentions[]` 收成我们能存的形状 */
+function toMentionInfo(mentions?: MentionLike[]): MentionInfo[] | undefined {
+  if (mentions === undefined || mentions.length === 0) return undefined;
+  return mentions.map((mention) => {
+    const id = mention.id ?? mention.member_openid ?? mention.user_openid;
+    const name = mention.nickname ?? mention.username;
+    return {
+      ...(id ? { id: String(id) } : {}),
+      ...(name ? { name: String(name) } : {}),
+      ...(mention.is_you ? { isYou: true } : {}),
+      ...(mention.scope === "all" ? { isAll: true } : {}),
+    };
+  });
 }
 
 function isBotMentioned(msg: InboundMessage): boolean {
@@ -142,9 +187,8 @@ function isBotMentioned(msg: InboundMessage): boolean {
   ) {
     return true;
   }
-  const mentions = (msg as unknown as { mentions?: MentionLike[] }).mentions;
-  if (Array.isArray(mentions)) {
-    return mentions.some((m) => m?.is_you === true);
+  if (Array.isArray(msg.mentions)) {
+    return msg.mentions.some((m) => m?.is_you === true);
   }
   return false;
 }
@@ -154,16 +198,18 @@ function toAttachmentInfo(
   raw: RawAttachmentLike,
   from: "current" | "quoted",
 ): AttachmentInfo {
+  // 语音只留平台转码后的 WAV：ffmpeg 之类的工具能直接吃，原始 SILK/AMR 不行
+  const url =
+    raw.content_type === "voice" ? (raw.voice_wav_url ?? raw.url) : raw.url;
   return {
     contentType: raw.content_type ? String(raw.content_type) : "unknown",
     from,
-    ...(raw.url ? { url: String(raw.url) } : {}),
+    ...(url ? { url: String(url) } : {}),
     ...(raw.filename ? { filename: String(raw.filename) } : {}),
     ...(typeof raw.size === "number" ? { size: raw.size } : {}),
     ...(typeof raw.width === "number" ? { width: raw.width } : {}),
     ...(typeof raw.height === "number" ? { height: raw.height } : {}),
     ...(raw.asr_refer_text ? { asrText: String(raw.asr_refer_text) } : {}),
-    ...(raw.voice_wav_url ? { voiceWavUrl: String(raw.voice_wav_url) } : {}),
   };
 }
 
@@ -191,6 +237,7 @@ export function normalizeInbound(
     ...ownAttachments.map((a) => toAttachmentInfo(a, "current")),
     ...quotedAttachments.map((a) => toAttachmentInfo(a, "quoted")),
   ];
+  const mentions = toMentionInfo(msg.mentions);
 
   return {
     appId,
@@ -199,9 +246,10 @@ export function normalizeInbound(
     messageId: msg.messageId,
     senderId: msg.senderId,
     senderName: msg.senderName,
-    content: stripMentionMarkers(msg.content ?? ""),
+    content: formatContent(msg.content ?? "", msg.mentions),
     mentionsBot: isBotMentioned(msg),
-    quotedContent: quoted ? stripMentionMarkers(quoted) : undefined,
+    ...(mentions ? { mentions } : {}),
+    quotedContent: quoted ? formatContent(quoted, msg.mentions) : undefined,
     attachments: attachments.length > 0 ? attachments : undefined,
     rawEventType: msg.rawEventType,
     timestamp: msg.timestamp,
@@ -258,6 +306,9 @@ export class YashiroGateway {
 
     this.bot.on("message", (_ctx: unknown, msg: InboundMessage) => {
       try {
+        // 平台原始事件只在 debug 下落盘。msg_elements 的语义（图文混排的顺序、
+        // 引用结构）官方文档没写清楚，排这类坑时只能靠真机 payload。
+        logger.debug(`原始事件: ${JSON.stringify(msg.raw)}`);
         const normalized = normalizeInbound(config.appId, msg);
         if (!normalized) return;
         logger.debug(

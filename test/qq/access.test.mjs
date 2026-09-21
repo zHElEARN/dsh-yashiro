@@ -87,6 +87,11 @@ describe("isIdCommand", () => {
     assert.equal(isIdCommand("  /id  ", true), true);
   });
 
+  it("正文里的 @ 已经换成昵称（或保留原始标记）时也认", () => {
+    assert.equal(isIdCommand("@Yashiro /id", true), true);
+    assert.equal(isIdCommand("<@BOT1> /id", true), true);
+  });
+
   it("没 @ 就不触发", () => {
     assert.equal(isIdCommand("/id", false), false);
   });

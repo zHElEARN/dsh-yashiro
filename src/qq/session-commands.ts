@@ -20,7 +20,9 @@ export type SessionCommand =
   | { kind: "switch"; id: string }
   | { kind: "list"; page: number }
   | { kind: "context" }
-  | { kind: "usage"; command: SessionCommandKind };
+  | { kind: "usage"; command: SessionCommandKind }
+  /** `/` 开头但不认识；command 是它原本的样子，用于回提示 */
+  | { kind: "unknown"; command: string };
 
 /** 会话 ID 在群里只显示前 8 位（sha256 全长 64 位，粘进 QQ 不现实） */
 export const SESSION_ID_DISPLAY = 8;
@@ -52,16 +54,35 @@ export function isSessionOperator(
   return approvers.includes(senderId);
 }
 
+/** `/id` 绕过访问控制、有自己的处理分支，所以这里不接管它，只借这个常量做排除 */
+export const ID_COMMAND = "/id";
+
+/**
+ * 去掉正文里的 @ 词，只留指令本身。
+ *
+ * 正文里的 @ 已经换成 `@昵称`（映射不到时是 `<@OPENID>`），指令前面常带一个 @机器人，
+ * 所以解析前先把这些词摘掉：`@Yashiro /id` 与 `/id` 等价。
+ */
+export function stripMentionWords(content: string): string {
+  return content
+    .trim()
+    .split(/\s+/)
+    .filter((word) => !word.startsWith("@") && !word.startsWith("<@"))
+    .join(" ");
+}
+
 /**
  * 解析一条会话指令；不是指令返回 undefined（调用方继续走 @ 流程）。
  *
- * 参数不合法一律回用法提示，不做模糊纠正 —— 猜错会话 ID 的代价是切到别的会话上。
+ * `/` 开头但认不出来的一律当未知指令 —— 不再丢给模型，免得斜杠开头的闲聊被当成任务。
+ * 参数不合法则回用法提示，不做模糊纠正 —— 猜错会话 ID 的代价是切到别的会话上。
  */
 export function parseSessionCommand(
   content: string,
 ): SessionCommand | undefined {
-  const [name, argument, ...extra] = content.trim().split(/\s+/);
+  const [name, argument, ...extra] = stripMentionWords(content).split(/\s+/);
   if (name === undefined || !name.startsWith("/")) return undefined;
+  if (name === ID_COMMAND) return undefined;
   const noArg = argument === undefined && extra.length === 0;
   const oneArg = argument !== undefined && extra.length === 0;
 
@@ -84,7 +105,11 @@ export function parseSessionCommand(
     return { kind: "list", page: Number(argument) };
   }
 
-  return undefined;
+  return { kind: "unknown", command: name };
+}
+
+export function buildUnknownCommandText(command: string): string {
+  return `未知指令 ${command}。可用：/current /new /switch /list /context /id。`;
 }
 
 /** 一行会话：`▶ 3f9a2b7c  2026-09-20 20:41  ← 当前` */

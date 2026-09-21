@@ -20,7 +20,7 @@ describe("buildUserText：被引用消息的附件", () => {
   it("空正文有占位，不会送出空白消息", () => {
     const noText = normalizeInbound("app", {
       ...quotedImage,
-      content: " <@BOT>  ",
+      content: "",
     });
     assert.ok(buildUserText(noText).includes("没有文字内容"));
   });

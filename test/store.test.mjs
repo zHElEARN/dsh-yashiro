@@ -116,6 +116,42 @@ describe("HistoryStore.appendOutbound", () => {
   });
 });
 
+describe("HistoryStore 的 JSON 列", () => {
+  it("mentions 存进去、读回来是同构的", () => {
+    store.append({
+      ...base,
+      messageId: "m-mentions",
+      content: "@Yashiro @张三 你看这个",
+      mentionsBot: true,
+      mentions: [
+        { id: "BOT1", name: "Yashiro", isYou: true },
+        { id: "U9", name: "张三" },
+      ],
+      timestamp: "2026-09-20T18:10:00+08:00",
+    });
+    const row = store.search({
+      appId: APP,
+      peerId: "G1",
+      query: "你看这个",
+      limit: 1,
+    })[0];
+    assert.deepEqual(row?.mentions, [
+      { id: "BOT1", name: "Yashiro", isYou: true },
+      { id: "U9", name: "张三" },
+    ]);
+  });
+
+  it("没有 mentions 时该字段不出现", () => {
+    const row = store.search({
+      appId: APP,
+      peerId: "G1",
+      query: "今天天气不错",
+      limit: 1,
+    })[0];
+    assert.equal(row?.mentions, undefined);
+  });
+});
+
 describe("HistoryStore 会话绑定", () => {
   const bind = (peerId) => ({ appId: APP, scope: "group", peerId });
   const KEY = bind("BIND-G1");

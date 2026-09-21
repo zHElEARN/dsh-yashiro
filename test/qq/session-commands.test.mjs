@@ -6,6 +6,7 @@ import {
   buildListText,
   buildSessionText,
   buildSwitchErrorText,
+  buildUnknownCommandText,
   buildUsageText,
   isSessionOperator,
   matchSession,
@@ -50,12 +51,42 @@ describe("parseSessionCommand", () => {
     });
   });
 
+  it("指令前面带 @机器人（@昵称 或没映射到的原始标记）也认", () => {
+    assert.deepEqual(parseSessionCommand("@Yashiro /new"), { kind: "new" });
+    assert.deepEqual(parseSessionCommand("<@BOT1> /switch abc123"), {
+      kind: "switch",
+      id: "abc123",
+    });
+    assert.deepEqual(parseSessionCommand("@Yashiro @张三 /list 2"), {
+      kind: "list",
+      page: 2,
+    });
+  });
+
   it("不是指令返回 undefined，@ 正文照常走", () => {
     assert.equal(parseSessionCommand("你好"), undefined);
     assert.equal(parseSessionCommand("帮我看看 /new 这个命令"), undefined);
-    assert.equal(parseSessionCommand("/newxxx"), undefined);
-    assert.equal(parseSessionCommand("/id"), undefined, "/id 有自己的处理分支");
     assert.equal(parseSessionCommand(""), undefined);
+    assert.equal(parseSessionCommand("/id"), undefined, "/id 有自己的处理分支");
+  });
+
+  it("`/` 开头但认不出来的一律当未知指令，不丢给模型", () => {
+    assert.deepEqual(parseSessionCommand("/233"), {
+      kind: "unknown",
+      command: "/233",
+    });
+    assert.deepEqual(parseSessionCommand("@Yashiro /Users/zhelearn/a.md"), {
+      kind: "unknown",
+      command: "/Users/zhelearn/a.md",
+    });
+    assert.deepEqual(parseSessionCommand("/newxxx"), {
+      kind: "unknown",
+      command: "/newxxx",
+    });
+    assert.deepEqual(parseSessionCommand("/"), {
+      kind: "unknown",
+      command: "/",
+    });
   });
 
   it("参数不合法回用法，不猜", () => {
@@ -157,6 +188,13 @@ describe("会话指令文案", () => {
   it("switch 与 list 的用法提示", () => {
     assert.match(buildUsageText("switch"), /\/switch <会话 ID>/);
     assert.match(buildUsageText("list"), /\/list \[页数\]/);
+  });
+
+  it("未知指令的提示带上原名与可用清单", () => {
+    const text = buildUnknownCommandText("/233");
+    assert.match(text, /未知指令 \/233/);
+    assert.match(text, /\/current/);
+    assert.match(text, /\/id/);
   });
 
   it("短 ID 取前 8 位", () => {

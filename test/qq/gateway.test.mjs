@@ -6,9 +6,9 @@ import { describe, it } from "node:test";
 import {
   chunkText,
   classifyMedia,
+  formatContent,
   inspectFileForSend,
   normalizeInbound,
-  stripMentionMarkers,
 } from "../../dist/qq/gateway.js";
 import { quotedImage, tempDir } from "../helpers.mjs";
 
@@ -35,20 +35,48 @@ const inbound = {
   ],
 };
 
-describe("stripMentionMarkers", () => {
-  it("剥掉 <@id>", () => {
+describe("formatContent", () => {
+  /** 群里的 mentions：机器人自己 + 一个普通群友 */
+  const mentions = [
+    { id: "BOT1", username: "Yashiro", is_you: true, bot: true },
+    { member_openid: "U9", nickname: "张三", is_you: false },
+  ];
+
+  it("<@id> 换成 @昵称，@别人 与 @机器人都保留", () => {
     assert.equal(
-      stripMentionMarkers("<@423E7675108B24CED2325760E49EE511> hello"),
-      "hello",
+      formatContent("<@BOT1> <@U9> 你看这个", mentions),
+      "@Yashiro @张三 你看这个",
     );
   });
 
-  it("剥掉 <@!id>", () => {
-    assert.equal(stripMentionMarkers("<@!ABC123> hi there"), "hi there");
+  it("<@!id> 也认", () => {
+    assert.equal(
+      formatContent("<@!BOT1> hi there", mentions),
+      "@Yashiro hi there",
+    );
   });
 
-  it("无标记原样", () => {
-    assert.equal(stripMentionMarkers("普通消息"), "普通消息");
+  it("映射不到（或压根没有 mentions）就保留原始标记，不丢信息", () => {
+    assert.equal(formatContent("<@UNKNOWN> 说话", mentions), "<@UNKNOWN> 说话");
+    assert.equal(formatContent("<@U9> 你好"), "<@U9> 你好");
+  });
+
+  it("@ 标记与后面的字贴在一起时也分开", () => {
+    assert.equal(formatContent("<@BOT1>/id", mentions), "@Yashiro /id");
+  });
+
+  it("表情标记收敛成 [表情]（新旧两种格式）", () => {
+    assert.equal(
+      formatContent(
+        'A<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">B[<face,id=12/>]C',
+        mentions,
+      ),
+      "A[表情]B[表情]C",
+    );
+  });
+
+  it("无标记的普通消息原样", () => {
+    assert.equal(formatContent("普通消息", mentions), "普通消息");
   });
 });
 
@@ -57,11 +85,25 @@ describe("normalizeInbound", () => {
     assert.equal(normalizeInbound("1905501006", inbound).mentionsBot, true);
   });
 
-  it("正文剥掉 @", () => {
+  it("正文里的 @ 换成昵称（@机器人 也留）", () => {
     assert.equal(
       normalizeInbound("1905501006", inbound).content,
-      "hello（回复信息同时带了@）",
+      "@Yashiro hello（回复信息同时带了@）",
     );
+  });
+
+  it("mentions 收成结构化的一列", () => {
+    assert.deepEqual(normalizeInbound("1905501006", inbound).mentions, [
+      { id: "423E7675108B24CED2325760E49EE511", name: "Yashiro", isYou: true },
+    ]);
+  });
+
+  it("没有 mentions 时该字段不出现", () => {
+    const msg = normalizeInbound("1905501006", {
+      ...inbound,
+      mentions: undefined,
+    });
+    assert.ok(!("mentions" in msg));
   });
 
   it("引用内容带出", () => {
@@ -187,12 +229,17 @@ describe("附件传递", () => {
     assert.equal(both.attachments?.length, 2);
   });
 
-  it("只发图不打字时正文被剥空", () => {
+  it("只发图不打字时正文只剩那个 @昵称", () => {
     const noText = normalizeInbound("app", {
       ...quotedImage,
       content: " <@BOT>  ",
     });
-    assert.equal(noText.content, "");
+    assert.equal(noText.content, "@Yashiro");
+  });
+
+  it("正文真的空时就是空串（纯图消息）", () => {
+    const empty = normalizeInbound("app", { ...quotedImage, content: "" });
+    assert.equal(empty.content, "");
   });
 
   it("纯文本无附件", () => {
@@ -202,6 +249,33 @@ describe("附件传递", () => {
       attachments: undefined,
     });
     assert.equal(plain.attachments, undefined);
+  });
+
+  it("语音只留平台转码后的 WAV", () => {
+    const voice = normalizeInbound("app", {
+      ...quotedImage,
+      msgElements: undefined,
+      attachments: [
+        {
+          content_type: "voice",
+          url: "https://example.com/v.silk",
+          voice_wav_url: "https://example.com/v.wav",
+          asr_refer_text: "今天天气不错",
+        },
+      ],
+    });
+    assert.equal(voice.attachments?.[0]?.url, "https://example.com/v.wav");
+    assert.equal(voice.attachments?.[0]?.asrText, "今天天气不错");
+    assert.ok(!("voiceWavUrl" in (voice.attachments?.[0] ?? {})));
+  });
+
+  it("平台没给 WAV 时退回原始语音 URL", () => {
+    const voice = normalizeInbound("app", {
+      ...quotedImage,
+      msgElements: undefined,
+      attachments: [{ content_type: "voice", url: "https://e.com/v.silk" }],
+    });
+    assert.equal(voice.attachments?.[0]?.url, "https://e.com/v.silk");
   });
 });
 

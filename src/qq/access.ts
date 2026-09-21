@@ -5,12 +5,11 @@
  * 匹配且只拦唤醒不影响入库、`/id` 指令绕过全部访问控制以打破配置自举的死循环。
  */
 import type { PeerRef } from "../core/types.js";
-
-export const ID_COMMAND = "/id";
+import { ID_COMMAND, stripMentionWords } from "./session-commands.js";
 
 /** 要求 @ 机器人是为了防误伤：群里有人随口打出 `/id` 不该触发回复 */
 export function isIdCommand(content: string, mentionsBot: boolean): boolean {
-  return mentionsBot && content.trim() === ID_COMMAND;
+  return mentionsBot && stripMentionWords(content) === ID_COMMAND;
 }
 
 export interface AccessConfig {

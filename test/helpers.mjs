@@ -57,7 +57,7 @@ export const quotedImage = {
   messageId: "m-img",
   timestamp: "2026-09-20T19:22:59+08:00",
   groupOpenid: "G1",
-  mentions: [{ is_you: true }],
+  mentions: [{ id: "BOT", username: "Yashiro", is_you: true }],
   msgElements: [
     {
       content: "",

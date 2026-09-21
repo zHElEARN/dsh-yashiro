@@ -16,12 +16,7 @@ import { Config } from "./core/config.js";
 import { describeError } from "./core/errors.js";
 import { createLogger } from "./core/logger.js";
 import { type ChatKey, chatKey, type PeerRef } from "./core/types.js";
-import {
-  buildIdReply,
-  decideAccess,
-  ID_COMMAND,
-  isIdCommand,
-} from "./qq/access.js";
+import { buildIdReply, decideAccess, isIdCommand } from "./qq/access.js";
 import { ApprovalChannel, type ApprovalContext } from "./qq/approval.js";
 import { YashiroGateway } from "./qq/gateway.js";
 import { buildUserText } from "./qq/message-text.js";
@@ -30,7 +25,9 @@ import {
   buildListText,
   buildSessionText,
   buildSwitchErrorText,
+  buildUnknownCommandText,
   buildUsageText,
+  ID_COMMAND,
   isSessionOperator,
   matchSession,
   NO_SESSION_TEXT,
@@ -234,6 +231,12 @@ export function apply(ctx: Context, config: Config): void {
     const peer: PeerRef = msg;
     const key = keyOf(peer);
     const reply = (text: string) => sendAndRecord(peer, text);
+
+    // 未知指令对所有人回同一句：它不涉及任何会话操作，也就没有权限可言
+    if (command.kind === "unknown") {
+      await reply(buildUnknownCommandText(command.command));
+      return;
+    }
 
     if (!isSessionOperator(msg.senderId, config.approvers)) {
       logger.info(`会话指令被非名单内的人触发：${msg.senderId}`);

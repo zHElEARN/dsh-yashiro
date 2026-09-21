@@ -17,3 +17,14 @@ export interface ChatKey extends PeerRef {
 export function chatKey(appId: string, peer: PeerRef): ChatKey {
   return { appId, scope: peer.scope, peerId: peer.peerId };
 }
+
+/** 消息里被 @ 的人（平台字段里我们留下的那部分，正文里的 @ 已换成昵称） */
+export interface MentionInfo {
+  /** openid；@全体 这类没有具体用户时为空 */
+  id?: string;
+  name?: string;
+  /** 是机器人自己 */
+  isYou?: boolean;
+  /** @全体成员 */
+  isAll?: boolean;
+}

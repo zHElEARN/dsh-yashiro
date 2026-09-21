@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { platformNowIso } from "./core/time.js";
-import type { ChatKey, Scope } from "./core/types.js";
+import type { ChatKey, MentionInfo, Scope } from "./core/types.js";
 
 /** 只记录平台给的元信息，不下载文件、不持久化 */
 export interface AttachmentInfo {
@@ -19,6 +19,7 @@ export interface AttachmentInfo {
   contentType: string;
   /** 附件挂在当前消息上，还是被引用的那条消息上 */
   from: "current" | "quoted";
+  /** 语音存的是平台转码后的 WAV */
   url?: string;
   filename?: string;
   size?: number;
@@ -26,8 +27,6 @@ export interface AttachmentInfo {
   height?: number;
   /** 语音的平台转写文本 */
   asrText?: string;
-  /** 语音平台转码后的 WAV URL */
-  voiceWavUrl?: string;
 }
 
 export interface StoredMessage {
@@ -38,9 +37,11 @@ export interface StoredMessage {
   messageId: string;
   senderId: string;
   senderName?: string;
-  /** 已剥掉 `<@...>` 标记 */
+  /** `@openid` 已换成 `@昵称`、表情已收敛成 `[表情]` */
   content: string;
   mentionsBot: boolean;
+  /** 这条消息 @ 了谁 */
+  mentions?: MentionInfo[];
   /** QQ 引用消息时平台会带上 */
   quotedContent?: string;
   attachments?: AttachmentInfo[];
@@ -132,6 +133,7 @@ export class HistoryStore {
         sender_name   TEXT,
         content       TEXT    NOT NULL,
         mentions_bot  INTEGER NOT NULL DEFAULT 0,
+        mentions      TEXT,
         quoted_content TEXT,
         attachments   TEXT,
         raw_event_type TEXT   NOT NULL,
@@ -163,8 +165,8 @@ export class HistoryStore {
       .prepare(
         `INSERT OR IGNORE INTO messages
            (app_id, scope, peer_id, message_id, sender_id, sender_name, content,
-            mentions_bot, quoted_content, attachments, raw_event_type, timestamp, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            mentions_bot, mentions, quoted_content, attachments, raw_event_type, timestamp, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         msg.appId,
@@ -175,6 +177,7 @@ export class HistoryStore {
         msg.senderName ?? null,
         msg.content,
         msg.mentionsBot ? 1 : 0,
+        msg.mentions?.length ? JSON.stringify(msg.mentions) : null,
         msg.quotedContent ?? null,
         msg.attachments?.length ? JSON.stringify(msg.attachments) : null,
         msg.rawEventType,
@@ -348,7 +351,7 @@ export class HistoryStore {
     const rows = this.db
       .prepare(
         `SELECT seq, app_id, scope, peer_id, message_id, sender_id, sender_name, content,
-                mentions_bot, quoted_content, attachments, raw_event_type, timestamp, ts
+                mentions_bot, mentions, quoted_content, attachments, raw_event_type, timestamp, ts
            FROM messages
           WHERE ${where.join(" AND ")}
           ORDER BY ts ${order}, seq ${order}
@@ -388,15 +391,17 @@ function toSessionBinding(row: Record<string, unknown>): SessionBinding {
   };
 }
 
-function toHistoryRow(row: Record<string, unknown>): HistoryRow {
-  let attachments: AttachmentInfo[] | undefined;
-  if (typeof row.attachments === "string" && row.attachments.length > 0) {
-    try {
-      attachments = JSON.parse(row.attachments) as AttachmentInfo[];
-    } catch {
-      attachments = undefined;
-    }
+/** JSON 列读回来；空值或坏数据都当没有 */
+function parseJson<T>(value: unknown): T | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
   }
+}
+
+function toHistoryRow(row: Record<string, unknown>): HistoryRow {
   return {
     seq: Number(row.seq),
     appId: String(row.app_id),
@@ -410,11 +415,12 @@ function toHistoryRow(row: Record<string, unknown>): HistoryRow {
         : String(row.sender_name),
     content: String(row.content),
     mentionsBot: Number(row.mentions_bot) === 1,
+    mentions: parseJson<MentionInfo[]>(row.mentions),
     quotedContent:
       row.quoted_content === null || row.quoted_content === undefined
         ? undefined
         : String(row.quoted_content),
-    attachments,
+    attachments: parseJson<AttachmentInfo[]>(row.attachments),
     rawEventType: String(row.raw_event_type),
     timestamp: String(row.timestamp),
     ts: Number(row.ts),
