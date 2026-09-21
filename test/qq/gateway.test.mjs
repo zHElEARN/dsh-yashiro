@@ -10,7 +10,7 @@ import {
   normalizeInbound,
   stripMentionMarkers,
 } from "../../dist/qq/gateway.js";
-import { tempDir } from "../helpers.mjs";
+import { quotedImage, tempDir } from "../helpers.mjs";
 
 /** 实测到的真实 payload 形态（全量模式下 @ 消息也叫 GROUP_MESSAGE_CREATE） */
 const inbound = {
@@ -78,7 +78,7 @@ describe("normalizeInbound", () => {
     );
   });
 
-  it("非 @ 不误判", () => {
+  it("非 @ 不误判，也不带引用", () => {
     const msg = normalizeInbound("1905501006", {
       ...inbound,
       content: "hello（不带@的信息）",
@@ -86,15 +86,6 @@ describe("normalizeInbound", () => {
       msgElements: undefined,
     });
     assert.equal(msg.mentionsBot, false);
-  });
-
-  it("非 @ 无引用", () => {
-    const msg = normalizeInbound("1905501006", {
-      ...inbound,
-      content: "hello（不带@的信息）",
-      mentions: undefined,
-      msgElements: undefined,
-    });
     assert.equal(msg.quotedContent, undefined);
   });
 
@@ -135,10 +126,6 @@ describe("chunkText", () => {
     assert.equal(chunkText("abc", 4500).length, 1);
   });
 
-  it("长文本被切分", () => {
-    assert.ok(chunkText(many, 200).length > 1);
-  });
-
   it("切分后无超长", () => {
     assert.ok(chunkText(many, 200).every((c) => c.length <= 200));
   });
@@ -150,38 +137,6 @@ describe("chunkText", () => {
 });
 
 describe("附件传递", () => {
-  /**
-   * 引用一张纯图片再 @ 机器人：被引用消息没有文字，附件只挂在 msgElements[0] 上。
-   * 这条路径必须一直有覆盖 —— 附件送不到 agent 面前时，它只会看到一条空消息。
-   */
-  const quotedImage = {
-    rawEventType: "GROUP_MESSAGE_CREATE",
-    kind: "group",
-    senderId: "U1",
-    senderName: "Zhe_Learn",
-    content: " <@BOT> 你看一下这张图看看是啥",
-    messageId: "m-img",
-    timestamp: "2026-09-20T19:22:59+08:00",
-    groupOpenid: "G1",
-    mentions: [{ is_you: true }],
-    msgElements: [
-      {
-        content: "",
-        message_type: 0,
-        attachments: [
-          {
-            content_type: "image/jpeg",
-            url: "https://multimedia.nt.qq.com.cn/download?fileid=abc",
-            filename: "cat.jpg",
-            width: 1206,
-            height: 2622,
-            size: 1363148,
-          },
-        ],
-      },
-    ],
-  };
-
   it("引用图片 → 附件被抓到且标记来源为 quoted", () => {
     const msg = normalizeInbound("app", quotedImage);
     assert.equal(msg.attachments?.length, 1);

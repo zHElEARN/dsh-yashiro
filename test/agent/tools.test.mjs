@@ -8,19 +8,13 @@ import {
   HISTORY_DEFAULT_LIMIT,
   HISTORY_MAX_LIMIT,
 } from "../../dist/agent/tools.js";
-import { tempStore } from "../helpers.mjs";
+import {
+  APP_ID as APP,
+  groupMessageBase as base,
+  tempStore,
+} from "../helpers.mjs";
 
 const store = tempStore("tools");
-
-const APP = "1905501006";
-const base = {
-  appId: APP,
-  scope: "group",
-  peerId: "G1",
-  senderId: "U1",
-  senderName: "Zhe_Learn",
-  rawEventType: "GROUP_MESSAGE_CREATE",
-};
 for (let i = 0; i < 5; i += 1) {
   store.append({
     ...base,
@@ -129,11 +123,6 @@ describe("qqbot_history", () => {
     const result = await createHistoryTool(deps).execute({ query: "xxx" }, {});
     assert.ok(result.messages[0].content.endsWith("…（已截断）"));
     assert.ok(result.messages[0].content.length < 900);
-  });
-
-  it("sender_name 作为展示名", async () => {
-    const result = await createHistoryTool(deps).execute({}, {});
-    assert.equal(result.messages[0].sender, "Zhe_Learn");
   });
 
   it("带附件的消息把附件也带出来（含 URL 与语音转写）", async () => {

@@ -20,18 +20,17 @@ const open = {
 const group = (peerId, senderId) => ({ scope: "group", peerId, senderId });
 
 describe("decideAccess：白名单 fail closed", () => {
-  it("空白名单：群消息被拒且原因是 group-not-allowed", () => {
-    const decision = decideAccess(group(GROUP, USER), empty);
-    assert.equal(decision.action, "deny-peer");
-    assert.equal(decision.reason, "group-not-allowed");
-  });
+  it("空白名单：群与单聊都拒，理由各自报准", () => {
+    const groupDecision = decideAccess(group(GROUP, USER), empty);
+    assert.equal(groupDecision.action, "deny-peer");
+    assert.equal(groupDecision.reason, "group-not-allowed");
 
-  it("空白名单：单聊被拒", () => {
-    assert.equal(
-      decideAccess({ scope: "c2c", peerId: USER, senderId: USER }, empty)
-        .action,
-      "deny-peer",
+    const c2cDecision = decideAccess(
+      { scope: "c2c", peerId: USER, senderId: USER },
+      empty,
     );
+    assert.equal(c2cDecision.action, "deny-peer");
+    assert.equal(c2cDecision.reason, "c2c-not-allowed");
   });
 
   it("群在白名单 → 放行；不在 → 拒", () => {

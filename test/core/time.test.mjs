@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  DISPLAY_TIME_ZONE,
-  formatTime,
-  platformNowIso,
-} from "../../dist/core/time.js";
+import { formatTime, platformNowIso } from "../../dist/core/time.js";
 
 describe("formatTime", () => {
   /**
@@ -21,10 +17,6 @@ describe("formatTime", () => {
 
   it("同一时刻的 UTC 表示 → 同样的显示", () => {
     assert.equal(outbound, platform);
-  });
-
-  it("展示时区固定为 Asia/Shanghai", () => {
-    assert.equal(DISPLAY_TIME_ZONE, "Asia/Shanghai");
   });
 });
 

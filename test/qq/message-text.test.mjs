@@ -2,51 +2,18 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { normalizeInbound } from "../../dist/qq/gateway.js";
 import { buildUserText } from "../../dist/qq/message-text.js";
-
-/** 被引用消息带一张图、当前消息不带附件的形态 */
-const quotedImage = {
-  rawEventType: "GROUP_MESSAGE_CREATE",
-  kind: "group",
-  senderId: "U1",
-  senderName: "Zhe_Learn",
-  content: " <@BOT> 你看一下这张图看看是啥",
-  messageId: "m-img",
-  timestamp: "2026-09-20T19:22:59+08:00",
-  groupOpenid: "G1",
-  mentions: [{ is_you: true }],
-  msgElements: [
-    {
-      content: "",
-      message_type: 0,
-      attachments: [
-        {
-          content_type: "image/jpeg",
-          url: "https://multimedia.nt.qq.com.cn/download?fileid=abc",
-          filename: "cat.jpg",
-          width: 1206,
-          height: 2622,
-          size: 1363148,
-        },
-      ],
-    },
-  ],
-};
+import { quotedImage } from "../helpers.mjs";
 
 describe("buildUserText：被引用消息的附件", () => {
   const msg = normalizeInbound("app", quotedImage);
   const text = buildUserText(msg);
 
-  it("正文含被引用附件标题", () => {
+  it("正文含被引用附件的标题、URL、类型与尺寸", () => {
     assert.ok(text.includes("被引用的那条消息带附件"), text);
-  });
-
-  it("正文含图片 URL", () => {
     assert.ok(
       text.includes("https://multimedia.nt.qq.com.cn/download?fileid=abc"),
+      text,
     );
-  });
-
-  it("正文标明是图片并带尺寸", () => {
     assert.ok(text.includes("图片 cat.jpg 1206x2622"), text);
   });
 

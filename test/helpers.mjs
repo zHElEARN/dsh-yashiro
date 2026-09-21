@@ -29,3 +29,49 @@ export function tempDir(name) {
   after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+/** 用例里的 appId 用同一个值，方便历史库与工具用例共用夹具 */
+export const APP_ID = "1905501006";
+
+/** 一条群消息的公共字段，用例按需覆盖（改 scope / peerId / 正文 / 附件…） */
+export const groupMessageBase = {
+  appId: APP_ID,
+  scope: "group",
+  peerId: "G1",
+  senderId: "U1",
+  senderName: "Zhe_Learn",
+  rawEventType: "GROUP_MESSAGE_CREATE",
+};
+
+/**
+ * 实测到的真实 payload：引用一张纯图片再 @ 机器人 —— 被引用消息没有文字，
+ * 附件只挂在 msgElements[0] 上。这条路径必须一直有覆盖，附件送不到 agent 面前时，
+ * 它只会看到一条空消息。
+ */
+export const quotedImage = {
+  rawEventType: "GROUP_MESSAGE_CREATE",
+  kind: "group",
+  senderId: "U1",
+  senderName: "Zhe_Learn",
+  content: " <@BOT> 你看一下这张图看看是啥",
+  messageId: "m-img",
+  timestamp: "2026-09-20T19:22:59+08:00",
+  groupOpenid: "G1",
+  mentions: [{ is_you: true }],
+  msgElements: [
+    {
+      content: "",
+      message_type: 0,
+      attachments: [
+        {
+          content_type: "image/jpeg",
+          url: "https://multimedia.nt.qq.com.cn/download?fileid=abc",
+          filename: "cat.jpg",
+          width: 1206,
+          height: 2622,
+          size: 1363148,
+        },
+      ],
+    },
+  ],
+};

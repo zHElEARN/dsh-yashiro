@@ -1,21 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { tempStore } from "./helpers.mjs";
+import {
+  APP_ID as APP,
+  groupMessageBase as base,
+  tempStore,
+} from "./helpers.mjs";
 
 const store = tempStore("store");
 
-const APP = "1905501006";
 const GROUP = { appId: APP, scope: "group", peerId: "G1" };
-
-const base = {
-  appId: APP,
-  scope: "group",
-  peerId: "G1",
-  senderId: "U1",
-  senderName: "Zhe_Learn",
-  rawEventType: "GROUP_MESSAGE_CREATE",
-};
 
 store.append({
   ...base,
@@ -95,11 +89,8 @@ describe("HistoryStore.search", () => {
 });
 
 describe("HistoryStore.countSince", () => {
-  it("只数非 @ 消息", () => {
+  it("excludeMentions 为真时只数非 @ 消息", () => {
     assert.equal(store.countSince(GROUP, 0, true), 2);
-  });
-
-  it("不排除 @ 消息时数全部", () => {
     assert.equal(store.countSince(GROUP, 0, false), 3);
   });
 
