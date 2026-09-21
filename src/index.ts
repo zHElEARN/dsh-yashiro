@@ -72,7 +72,6 @@ interface AgentLike {
 
 export function apply(ctx: Context, config: Config): void {
   const store = new HistoryStore(config.historyDbPath?.trim() || defaultHistoryDbPath())
-  const promptTemplate = config.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT
 
   /** 上次唤醒 agent 的时间（每个会话），用来告诉它「你不在的时候群里又聊了多少」 */
   const lastWakeAt = new Map<string, number>()
@@ -148,7 +147,7 @@ export function apply(ctx: Context, config: Config): void {
       agentCtx.systemPrompt.section({
         name: 'dsh-yashiro:channel',
         order: 90,
-        text: promptTemplate,
+        text: DEFAULT_SYSTEM_PROMPT,
       })
     }
   }

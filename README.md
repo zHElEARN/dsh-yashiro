@@ -122,7 +122,6 @@ dsh --profile yashiro
 | `busyDelivery` | `'steer'` | 它正在跑回合时新 @ 进来的消息：`steer` 插队（下个 step 就被看到）／`queue` 排队（等下一个回合） |
 | `approvers` | `[]` | 谁能点审批卡片的「允许一次」（openid 白名单）。**空 = 群里任何人都能点**（与腾讯官方插件一致） |
 | `approvalTimeoutSeconds` | `300` | 审批卡片无人处理多久后按「拒绝」收场 |
-| `systemPrompt` | 内置 | 覆盖注入的系统提示词。这是 agent 知道「回复必须走 `qqbot_send`」的唯一途径，谨慎修改 |
 | `debug` | `false` | 打开后写 DEBUG 级文件日志 |
 
 ## 访问控制

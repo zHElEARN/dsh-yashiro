@@ -29,8 +29,6 @@ export interface Config {
   approvalTimeoutSeconds: number
   /** agent 跑回合时新 @ 进来的消息：steer 插队（下个 step 边界可见），queue 等下一个回合 */
   busyDelivery: 'steer' | 'queue'
-  /** 留空用内置默认值。这是 agent 知道「必须用 qqbot_send 回复」的唯一途径，谨慎修改 */
-  systemPrompt?: string
   /** 打开后写 DEBUG 级文件日志 */
   debug: boolean
 }
@@ -48,6 +46,5 @@ export const Config: Schema<Config> = Schema.object({
   approvers: Schema.array(Schema.string()).default([]),
   approvalTimeoutSeconds: Schema.number().default(300),
   busyDelivery: Schema.union([Schema.const('steer'), Schema.const('queue')]).default('steer'),
-  systemPrompt: Schema.string(),
   debug: Schema.boolean().default(false),
 })
