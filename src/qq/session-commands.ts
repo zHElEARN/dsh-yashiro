@@ -1,5 +1,5 @@
 /**
- * 会话指令：`/current`、`/new`、`/switch <ID>`、`/list [页数]`、`/context`。
+ * 会话指令：`/current`、`/new`、`/switch <ID>`、`/list [页数]`、`/context`、`/stop`。
  *
  * 和 `/id` 一样由插件直接回复，不进 dsh、不消耗模型调用。解析与文案都是纯函数，
  * 落库/建会话这些副作用由 index.ts 处理。
@@ -12,7 +12,8 @@ export type SessionCommandKind =
   | "new"
   | "switch"
   | "list"
-  | "context";
+  | "context"
+  | "stop";
 
 export type SessionCommand =
   | { kind: "current" }
@@ -20,6 +21,7 @@ export type SessionCommand =
   | { kind: "switch"; id: string }
   | { kind: "list"; page: number }
   | { kind: "context" }
+  | { kind: "stop" }
   | { kind: "usage"; command: SessionCommandKind }
   /** `/` 开头但不认识；command 是它原本的样子，用于回提示 */
   | { kind: "unknown"; command: string };
@@ -33,12 +35,14 @@ export function shortSessionId(sessionId: string): string {
   return sessionId.slice(0, SESSION_ID_DISPLAY);
 }
 
-/** 这三条都不接受参数 */
-const NO_ARG_COMMANDS: Record<string, "current" | "new" | "context"> = {
-  "/current": "current",
-  "/new": "new",
-  "/context": "context",
-};
+/** 这几条都不接受参数 */
+const NO_ARG_COMMANDS: Record<string, "current" | "new" | "context" | "stop"> =
+  {
+    "/current": "current",
+    "/new": "new",
+    "/context": "context",
+    "/stop": "stop",
+  };
 
 /**
  * 只有这些人才允许切换/新建会话。
@@ -109,7 +113,7 @@ export function parseSessionCommand(
 }
 
 export function buildUnknownCommandText(command: string): string {
-  return `未知指令 ${command}。可用：/current /new /switch /list /context /id。`;
+  return `未知指令 ${command}。可用：/current /new /switch /list /context /stop /id。`;
 }
 
 /** 一行会话：`▶ 3f9a2b7c  2026-09-20 20:41  ← 当前` */
@@ -138,6 +142,10 @@ export interface SessionListContext {
 export const NO_SESSION_TEXT =
   "这个群还没有会话。用 /new 建一个，之后 @ 我才会回应。";
 
+/** `/stop` 的两句回执：停下来了 / 本来就没在跑 */
+export const STOPPED_TEXT = "已停止当前回合。";
+export const NOTHING_RUNNING_TEXT = "当前没有正在跑的回合。";
+
 export function buildUsageText(command: SessionCommandKind): string {
   switch (command) {
     case "current":
@@ -150,6 +158,8 @@ export function buildUsageText(command: SessionCommandKind): string {
       return "用法：/list [页数]，页数从 1 开始。";
     case "context":
       return "/context 不接受参数。";
+    case "stop":
+      return "/stop 不接受参数。";
   }
 }
 

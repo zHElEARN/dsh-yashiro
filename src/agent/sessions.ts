@@ -66,6 +66,19 @@ export class SessionManager {
   }
 
   /**
+   * 取这条会话活着的 agent：先看本插件的内存表，再问 live registry。
+   *
+   * 只查内存表不够 —— 插件热重载后 registry 里还活着，而我们这张表是空的。
+   * 没活着、或压根不是本插件的会话，都返回 undefined。
+   */
+  live(sessionId: string): Agent | undefined {
+    return (
+      this.sessions.get(sessionId as SessionId)?.agent ??
+      this.ctx.agents.get(sessionId as SessionId)
+    );
+  }
+
+  /**
    * `ctx.agents.create()` 不会自己查默认模型，必须由调用方把 agentOptions 传进去，
    * 否则 agent 没有模型路由，回合跑不起来（session 建了但一句话不回）。
    */

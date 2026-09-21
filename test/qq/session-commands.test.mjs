@@ -11,8 +11,10 @@ import {
   isSessionOperator,
   matchSession,
   NO_SESSION_TEXT,
+  NOTHING_RUNNING_TEXT,
   parseSessionCommand,
   SESSIONS_PER_PAGE,
+  STOPPED_TEXT,
   shortSessionId,
 } from "../../dist/qq/session-commands.js";
 
@@ -31,7 +33,7 @@ const line = (id, updatedAt, current = false) => ({
 });
 
 describe("parseSessionCommand", () => {
-  it("五条指令的基本形态", () => {
+  it("六条指令的基本形态", () => {
     assert.deepEqual(parseSessionCommand("/current"), { kind: "current" });
     assert.deepEqual(parseSessionCommand("/new"), { kind: "new" });
     assert.deepEqual(parseSessionCommand("/switch abc123"), {
@@ -41,6 +43,7 @@ describe("parseSessionCommand", () => {
     assert.deepEqual(parseSessionCommand("/list"), { kind: "list", page: 1 });
     assert.deepEqual(parseSessionCommand("/list 3"), { kind: "list", page: 3 });
     assert.deepEqual(parseSessionCommand("/context"), { kind: "context" });
+    assert.deepEqual(parseSessionCommand("/stop"), { kind: "stop" });
   });
 
   it("前后空白与重复空格都能容忍", () => {
@@ -94,6 +97,7 @@ describe("parseSessionCommand", () => {
       ["/current 1", "current"],
       ["/new 1", "new"],
       ["/context 1", "context"],
+      ["/stop 1", "stop"],
       ["/switch", "switch"],
       ["/switch a b", "switch"],
       ["/list abc", "list"],
@@ -190,10 +194,16 @@ describe("会话指令文案", () => {
     assert.match(buildUsageText("list"), /\/list \[页数\]/);
   });
 
+  it("/stop 的两句回执", () => {
+    assert.match(STOPPED_TEXT, /已停止/);
+    assert.match(NOTHING_RUNNING_TEXT, /没有正在跑的回合/);
+  });
+
   it("未知指令的提示带上原名与可用清单", () => {
     const text = buildUnknownCommandText("/233");
     assert.match(text, /未知指令 \/233/);
     assert.match(text, /\/current/);
+    assert.match(text, /\/stop/);
     assert.match(text, /\/id/);
   });
 

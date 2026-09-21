@@ -31,12 +31,18 @@ import {
   isSessionOperator,
   matchSession,
   NO_SESSION_TEXT,
+  NOTHING_RUNNING_TEXT,
   parseSessionCommand,
   SESSIONS_PER_PAGE,
   type SessionCommand,
   type SessionLine,
+  STOPPED_TEXT,
   shortSessionId,
 } from "./qq/session-commands.js";
+import {
+  buildTurnNoticeText,
+  type TurnEndReasonLike,
+} from "./qq/turn-notice.js";
 import {
   defaultHistoryDbPath,
   HistoryStore,
@@ -115,6 +121,24 @@ export function apply(ctx: Context, config: Config): void {
     logger,
   );
   approval.install(ctx as unknown as ApprovalContext);
+
+  /**
+   * 回合异常播报：本插件所有会话（含切走后仍在跑的旧会话）以 error / max-tokens
+   * 收尾时，往它对应的群或单聊说一句。哪些 reason 值得报、文案怎么写，全在
+   * turn-notice.ts 那个纯函数里。
+   */
+  ctx.on("session/event", (session, event) => {
+    const typed = event as { type?: unknown; data?: { reason?: unknown } };
+    if (typed.type !== "turn/end") return;
+    const sessionId = String((session as { id?: unknown }).id ?? "");
+    if (sessionId === "") return;
+    const peer = sessions.findTarget(sessionId);
+    if (peer === undefined) return;
+    const text = buildTurnNoticeText(typed.data?.reason as TurnEndReasonLike);
+    if (text === undefined) return;
+    logger.warn(`回合异常播报：${text} peer=${peer.peerId}`);
+    void sendAndRecord(peer, text);
+  });
 
   /** 这个 QQ 会话在历史库里的键（appId 由配置来） */
   function keyOf(peer: PeerRef): ChatKey {
@@ -306,6 +330,32 @@ export function apply(ctx: Context, config: Config): void {
       } catch (err) {
         logger.error(`新建会话失败: ${describeError(err)}`);
         await reply("新建会话失败，当前会话没有变化。详情见插件日志。");
+      }
+      return;
+    }
+
+    if (command.kind === "stop") {
+      const binding = store.getCurrentSession(key);
+      if (binding === undefined) {
+        await reply(NOTHING_RUNNING_TEXT);
+        return;
+      }
+      const agent = sessions.live(binding.sessionId);
+      // 会话存在不等于正在跑：只有 agent 处于 running 才算有回合可停
+      if (agent === undefined || agent.status !== "running") {
+        await reply(NOTHING_RUNNING_TEXT);
+        return;
+      }
+      try {
+        // 不带 keepInbox：排队与待注入的消息一起丢，"停"就是全停
+        agent.cancel({ kind: "user" });
+        logger.info(
+          `已停止当前回合：${shortSessionId(binding.sessionId)} peer=${peer.peerId}`,
+        );
+        await reply(STOPPED_TEXT);
+      } catch (err) {
+        logger.error(`停止回合失败: ${describeError(err)}`);
+        await reply("停止失败，详情见插件日志。");
       }
       return;
     }
