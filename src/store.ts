@@ -45,35 +45,59 @@ export interface StoredMessage {
   mentions?: MentionInfo[];
   /** QQ 引用消息时平台会带上 */
   quotedContent?: string;
+  /** 平台给这条消息的序号，用来解析"谁引用了谁" */
+  msgIdx?: string;
+  /** 这条消息引用的那条消息的平台序号 */
+  quotedMsgIdx?: string;
   attachments?: AttachmentInfo[];
   rawEventType: string;
   /** 平台时间戳（RFC3339） */
   timestamp: string;
 }
 
-/** 比 StoredMessage 多两个查询用的列 */
+/** 比 StoredMessage 多几个查询用的列 */
 export interface HistoryRow extends StoredMessage {
-  /** 自增主键 */
+  /** 自增主键，也是给模型看的 `#id` */
   seq: number;
   /** epoch 毫秒 */
   ts: number;
+  /** 被引用那条消息的说话人；库里查不到时为 undefined */
+  quotedSenderId?: string;
+  quotedSenderName?: string;
 }
 
-export interface SearchOptions {
+/** 一条消息的过滤条件，search / count 共用 */
+export interface MessageFilter {
   appId: string;
   scope?: Scope;
   peerId?: string;
-  /** 子串匹配消息正文与引用正文 */
+  /** 子串匹配正文、引用正文与附件（文件名/URL） */
   query?: string;
-  /** 发送者昵称，模糊匹配 */
-  senderName?: string;
+  /** 子串匹配发送者昵称或 openid */
+  sender?: string;
   /** epoch 毫秒 */
   since?: number;
   /** epoch 毫秒 */
   until?: number;
+  /** 只看 seq 小于它的 */
+  beforeSeq?: number;
+  /** 只看 seq 大于它的 */
+  afterSeq?: number;
+  /** 只看（不）@ 过机器人的 */
+  mentionsMe?: boolean;
+}
+
+export interface SearchOptions extends MessageFilter {
   limit: number;
-  /** 默认 desc，由近及远 */
+  /** 默认 desc，由近及远（按 seq，也就是入库顺序） */
   order?: "asc" | "desc";
+}
+
+/** 整个 QQ 会话的规模，用来在结果头部给出"地图" */
+export interface MessageStats {
+  total: number;
+  firstTs?: number;
+  lastTs?: number;
 }
 
 /** 一条会话绑定：QQ 会话内第 epoch 条 dsh 会话 */
@@ -136,6 +160,8 @@ export class HistoryStore {
         mentions_bot  INTEGER NOT NULL DEFAULT 0,
         mentions      TEXT,
         quoted_content TEXT,
+        msg_idx       TEXT,
+        quoted_msg_idx TEXT,
         attachments   TEXT,
         raw_event_type TEXT   NOT NULL,
         timestamp     TEXT    NOT NULL,
@@ -143,6 +169,7 @@ export class HistoryStore {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msgid ON messages(app_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_messages_peer_ts ON messages(app_id, peer_id, ts);
+      CREATE INDEX IF NOT EXISTS idx_messages_msgidx ON messages(app_id, peer_id, msg_idx);
 
       CREATE TABLE IF NOT EXISTS session_bindings (
         app_id      TEXT    NOT NULL,
@@ -159,15 +186,21 @@ export class HistoryStore {
     `);
   }
 
-  /** 落一条消息；message_id 重复时静默忽略（平台可能重推） */
-  append(msg: StoredMessage): void {
+  /**
+   * 落一条消息；message_id 重复时静默忽略（平台可能重推）。
+   *
+   * @returns 这一行的 seq（重复推送时是已存在那行的 seq）。插件用它记住"上次投递给
+   * agent 的是哪条"。
+   */
+  append(msg: StoredMessage): number | undefined {
     const ts = Date.parse(msg.timestamp);
-    this.db
+    const info = this.db
       .prepare(
         `INSERT OR IGNORE INTO messages
            (app_id, scope, peer_id, message_id, sender_id, sender_name, content,
-            mentions_bot, mentions, quoted_content, attachments, raw_event_type, timestamp, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            mentions_bot, mentions, quoted_content, msg_idx, quoted_msg_idx,
+            attachments, raw_event_type, timestamp, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         msg.appId,
@@ -180,11 +213,21 @@ export class HistoryStore {
         msg.mentionsBot ? 1 : 0,
         msg.mentions?.length ? JSON.stringify(msg.mentions) : null,
         msg.quotedContent ?? null,
+        msg.msgIdx ?? null,
+        msg.quotedMsgIdx ?? null,
         msg.attachments?.length ? JSON.stringify(msg.attachments) : null,
         msg.rawEventType,
         msg.timestamp,
         Number.isFinite(ts) ? ts : Date.now(),
       );
+
+    if (info.changes > 0) return Number(info.lastInsertRowid);
+
+    // 被 INSERT OR IGNORE 忽略了（平台重推）：lastInsertRowid 是上一条的，不能信
+    const existing = this.db
+      .prepare("SELECT seq FROM messages WHERE app_id = ? AND message_id = ?")
+      .get(msg.appId, msg.messageId) as { seq: number } | undefined;
+    return existing === undefined ? undefined : Number(existing.seq);
   }
 
   /**
@@ -321,51 +364,64 @@ export class HistoryStore {
     };
   }
 
+  /**
+   * 取一段消息。
+   *
+   * **按 `seq` 而不是 `ts` 排序**：游标（beforeSeq / afterSeq）与"还有多少条"都建立在
+   * `seq` 上，窗口排序必须跟着它，否则一旦有消息晚到（seq 与 ts 不同序），翻页就会
+   * 出现重叠或空洞。`ts` 只负责展示与时间过滤。
+   */
   search(opts: SearchOptions): HistoryRow[] {
-    const where: string[] = ["app_id = ?"];
-    const params: Array<string | number> = [opts.appId];
-
-    if (opts.scope) {
-      where.push("scope = ?");
-      params.push(opts.scope);
-    }
-    if (opts.peerId) {
-      where.push("peer_id = ?");
-      params.push(opts.peerId);
-    }
-    if (opts.query) {
-      where.push("(content LIKE ? OR quoted_content LIKE ?)");
-      const like = `%${opts.query}%`;
-      params.push(like, like);
-    }
-    if (opts.senderName) {
-      where.push("sender_name LIKE ?");
-      params.push(`%${opts.senderName}%`);
-    }
-    if (opts.since !== undefined) {
-      where.push("ts >= ?");
-      params.push(opts.since);
-    }
-    if (opts.until !== undefined) {
-      where.push("ts <= ?");
-      params.push(opts.until);
-    }
-
+    const { where, params } = buildFilter(opts);
     const order = opts.order === "asc" ? "ASC" : "DESC";
-    params.push(Math.max(1, Math.floor(opts.limit)));
+    const all = [...params, Math.max(1, Math.floor(opts.limit))];
 
     const rows = this.db
       .prepare(
-        `SELECT seq, app_id, scope, peer_id, message_id, sender_id, sender_name, content,
-                mentions_bot, mentions, quoted_content, attachments, raw_event_type, timestamp, ts
-           FROM messages
+        `SELECT ${ROW_COLUMNS}
+           FROM messages m
+           LEFT JOIN messages q
+             ON q.app_id = m.app_id AND q.peer_id = m.peer_id
+            AND q.msg_idx = m.quoted_msg_idx
           WHERE ${where.join(" AND ")}
-          ORDER BY ts ${order}, seq ${order}
+          ORDER BY m.seq ${order}
           LIMIT ?`,
       )
-      .all(...params);
+      .all(...all);
 
     return rows.map(toHistoryRow);
+  }
+
+  /** 同一组过滤条件下的条数，用来告诉模型"还有多少条没取" */
+  count(opts: MessageFilter): number {
+    const { where, params } = buildFilter(opts);
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM messages m WHERE ${where.join(" AND ")}`,
+      )
+      .get(...params) as { n: number } | undefined;
+    return Number(row?.n ?? 0);
+  }
+
+  /** 整个 QQ 会话的规模（不带任何过滤），结果头部的"地图"用它 */
+  stats(key: ChatKey): MessageStats {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts
+           FROM messages WHERE app_id = ? AND scope = ? AND peer_id = ?`,
+      )
+      .get(key.appId, key.scope, key.peerId) as
+      | { n: number; first_ts: number | null; last_ts: number | null }
+      | undefined;
+    return {
+      total: Number(row?.n ?? 0),
+      ...(row?.first_ts === null || row?.first_ts === undefined
+        ? {}
+        : { firstTs: Number(row.first_ts) }),
+      ...(row?.last_ts === null || row?.last_ts === undefined
+        ? {}
+        : { lastTs: Number(row.last_ts) }),
+    };
   }
 
   /** 该会话自某个时间点以来有多少条消息；excludeMentions 为真时只数非 @ 的 */
@@ -386,6 +442,77 @@ export class HistoryStore {
       /* 已被关闭 */
     }
   }
+}
+
+/** LIKE 的通配符转义：`%`、`_`、`\` 都按字面量处理，模型给什么就找什么 */
+function likePattern(text: string): string {
+  return `%${text.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+}
+
+/** search 取的列；引用者两列来自自连接 */
+const ROW_COLUMNS = `m.seq, m.app_id, m.scope, m.peer_id, m.message_id, m.sender_id,
+        m.sender_name, m.content, m.mentions_bot, m.mentions, m.quoted_content,
+        m.msg_idx, m.quoted_msg_idx, m.attachments, m.raw_event_type, m.timestamp, m.ts,
+        q.sender_id AS quoted_sender_id, q.sender_name AS quoted_sender_name`;
+
+/**
+ * 过滤条件 → WHERE 片段。
+ *
+ * search 与 count 共用同一套：两边要是走岔了，结果头部那句"还有 N 条"就是错的。
+ */
+function buildFilter(opts: MessageFilter): {
+  where: string[];
+  params: Array<string | number>;
+} {
+  const where: string[] = ["m.app_id = ?"];
+  const params: Array<string | number> = [opts.appId];
+
+  if (opts.scope) {
+    where.push("m.scope = ?");
+    params.push(opts.scope);
+  }
+  if (opts.peerId) {
+    where.push("m.peer_id = ?");
+    params.push(opts.peerId);
+  }
+  if (opts.query) {
+    // 附件是 JSON 列，整列 LIKE 就等于匹配文件名与 URL
+    where.push(
+      "(m.content LIKE ? ESCAPE '\\' OR m.quoted_content LIKE ? ESCAPE '\\' OR m.attachments LIKE ? ESCAPE '\\')",
+    );
+    const like = likePattern(opts.query);
+    params.push(like, like, like);
+  }
+  if (opts.sender) {
+    // 昵称取不到时（单聊）只能靠 openid，所以两边都匹配
+    where.push(
+      "(m.sender_name LIKE ? ESCAPE '\\' OR m.sender_id LIKE ? ESCAPE '\\')",
+    );
+    const like = likePattern(opts.sender);
+    params.push(like, like);
+  }
+  if (opts.since !== undefined) {
+    where.push("m.ts >= ?");
+    params.push(opts.since);
+  }
+  if (opts.until !== undefined) {
+    where.push("m.ts <= ?");
+    params.push(opts.until);
+  }
+  if (opts.beforeSeq !== undefined) {
+    where.push("m.seq < ?");
+    params.push(opts.beforeSeq);
+  }
+  if (opts.afterSeq !== undefined) {
+    where.push("m.seq > ?");
+    params.push(opts.afterSeq);
+  }
+  if (opts.mentionsMe !== undefined) {
+    where.push("m.mentions_bot = ?");
+    params.push(opts.mentionsMe ? 1 : 0);
+  }
+
+  return { where, params };
 }
 
 function toSessionBinding(row: Record<string, unknown>): SessionBinding {
@@ -426,9 +553,23 @@ function toHistoryRow(row: Record<string, unknown>): HistoryRow {
       row.quoted_content === null || row.quoted_content === undefined
         ? undefined
         : String(row.quoted_content),
+    msgIdx:
+      row.msg_idx === null || row.msg_idx === undefined
+        ? undefined
+        : String(row.msg_idx),
+    quotedMsgIdx:
+      row.quoted_msg_idx === null || row.quoted_msg_idx === undefined
+        ? undefined
+        : String(row.quoted_msg_idx),
     attachments: parseJson<AttachmentInfo[]>(row.attachments),
     rawEventType: String(row.raw_event_type),
     timestamp: String(row.timestamp),
     ts: Number(row.ts),
+    ...(row.quoted_sender_id === null || row.quoted_sender_id === undefined
+      ? {}
+      : { quotedSenderId: String(row.quoted_sender_id) }),
+    ...(row.quoted_sender_name === null || row.quoted_sender_name === undefined
+      ? {}
+      : { quotedSenderName: String(row.quoted_sender_name) }),
   };
 }

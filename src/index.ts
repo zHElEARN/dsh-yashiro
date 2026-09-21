@@ -80,6 +80,8 @@ export function apply(ctx: Context, config: Config): void {
 
   /** 上次唤醒 agent 的时间（按会话），用来告诉它「你不在的时候群里又聊了多少」 */
   const lastWakeAt = new Map<string, number>();
+  /** 上次投递给 agent 的那条消息的 seq（按会话），唤醒消息里的锚点 */
+  const lastDeliveredSeq = new Map<string, number>();
   /** 已处理过的消息 ID（按会话），防止平台重推导致重复唤醒 */
   const seenMessages = new Map<string, Set<string>>();
 
@@ -334,8 +336,9 @@ export function apply(ctx: Context, config: Config): void {
     const key = keyOf(peer);
 
     // 入库先于访问控制：白名单只决定「要不要唤醒 agent」，不决定「要不要记录」
+    let incomingSeq: number | undefined;
     try {
-      store.append(msg);
+      incomingSeq = store.append(msg);
     } catch (err) {
       logger.error(`写入历史库失败: ${describeError(err)}`);
     }
@@ -397,6 +400,7 @@ export function apply(ctx: Context, config: Config): void {
 
     // 首次唤醒不报数，否则 agent 一上来就被告知「有几千条新消息」
     const previousWake = lastWakeAt.get(dedupeKey);
+    const previousDeliveredSeq = lastDeliveredSeq.get(dedupeKey);
     let newSinceLastWake: number | undefined;
     if (config.announceNewMessageCount && previousWake !== undefined) {
       try {
@@ -422,7 +426,15 @@ export function apply(ctx: Context, config: Config): void {
       }
       const message = createUserMessage({
         content: [
-          { type: "text", text: buildUserText(msg, { newSinceLastWake }) },
+          {
+            type: "text",
+            text: buildUserText(msg, {
+              newSinceLastWake,
+              ...(previousDeliveredSeq !== undefined
+                ? { lastDeliveredSeq: previousDeliveredSeq }
+                : {}),
+            }),
+          },
         ],
         source: { kind: "plugin", plugin: PLUGIN_ID },
       });
@@ -431,6 +443,8 @@ export function apply(ctx: Context, config: Config): void {
       else agent.steer(message);
       store.touchSession(key, current.epoch);
       lastWakeAt.set(dedupeKey, Date.parse(msg.timestamp) || Date.now());
+      if (incomingSeq !== undefined)
+        lastDeliveredSeq.set(dedupeKey, incomingSeq);
       logger.info(
         `已唤醒 agent：session=${String(agent.id).slice(0, 12)}… peer=${peer.peerId}`,
       );

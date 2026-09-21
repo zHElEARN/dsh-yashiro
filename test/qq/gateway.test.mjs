@@ -21,6 +21,9 @@ const inbound = {
   messageId: "ROBOT1.0_xxx",
   timestamp: "2026-09-20T18:27:40+08:00",
   groupOpenid: "A22459EFEB65CFF0405CB716510F7C57",
+  // SDK 从 message_scene.ext 与 msg_elements[0] 里解析出来的平台序号
+  msgIdx: "REFIDX_self",
+  refMsgIdx: "REFIDX_quoted",
   mentions: [
     {
       bot: true,
@@ -117,6 +120,22 @@ describe("normalizeInbound", () => {
       normalizeInbound("1905501006", inbound).peerId,
       "A22459EFEB65CFF0405CB716510F7C57",
     );
+  });
+
+  it("平台序号带进来（历史里靠它解析引用者）", () => {
+    const msg = normalizeInbound("1905501006", inbound);
+    assert.equal(msg.msgIdx, "REFIDX_self");
+    assert.equal(msg.quotedMsgIdx, "REFIDX_quoted");
+  });
+
+  it("没有平台序号时这两个字段不出现", () => {
+    const msg = normalizeInbound("1905501006", {
+      ...inbound,
+      msgIdx: undefined,
+      refMsgIdx: undefined,
+    });
+    assert.ok(!("msgIdx" in msg));
+    assert.ok(!("quotedMsgIdx" in msg));
   });
 
   it("非 @ 不误判，也不带引用", () => {

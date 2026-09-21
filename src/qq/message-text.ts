@@ -39,6 +39,38 @@ export function describeAttachment(attachment: AttachmentInfo): string {
 export interface UserTextOptions {
   /** 自上次唤醒以来群里新增的非 @ 消息数 */
   newSinceLastWake?: number;
+  /**
+   * 上次投递给 agent 的那条消息的 seq。
+   *
+   * 它是 agent 在时间线上的锚点：唤醒消息里说「投递到 #124」，agent 就能用
+   * `qqbot_history(after_seq=124)` 精确取到此后新增的消息，而不是靠猜时间窗。
+   * 首次唤醒、以及插件重启后的第一次唤醒都没有这个值。
+   */
+  lastDeliveredSeq?: number;
+}
+
+/**
+ * 「你不在的时候群里发生了什么」那一句。
+ *
+ * 有锚点就一定说出来（哪怕这期间没人说话）—— 锚点是 agent 的时间线位置，不该依赖
+ * "恰好有人说话"才出现。
+ */
+function describeSinceLastWake(options: UserTextOptions): string | undefined {
+  const { lastDeliveredSeq, newSinceLastWake } = options;
+
+  if (lastDeliveredSeq === undefined) {
+    return newSinceLastWake !== undefined && newSinceLastWake > 0
+      ? `自你上次被唤醒以来，群里还有 ${newSinceLastWake} 条没 @ 你的消息。`
+      : undefined;
+  }
+
+  const tail =
+    newSinceLastWake === undefined
+      ? ""
+      : newSinceLastWake > 0
+        ? `；此后群里新增 ${newSinceLastWake} 条没 @ 你的消息`
+        : "；此后群里没有新消息";
+  return `你上次被唤醒时投递到 #${lastDeliveredSeq}${tail}。`;
 }
 
 export function buildUserText(
@@ -73,12 +105,8 @@ export function buildUserText(
       appendAttachment(lines, attachment);
   }
 
-  if (options.newSinceLastWake !== undefined && options.newSinceLastWake > 0) {
-    lines.push(
-      "",
-      `（自你上次开口以来，群里还有 ${options.newSinceLastWake} 条新消息。）`,
-    );
-  }
+  const since = describeSinceLastWake(options);
+  if (since !== undefined) lines.push("", `（${since}）`);
 
   return lines.join("\n");
 }

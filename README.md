@@ -38,7 +38,7 @@ dsh --profile yashiro
 | `allowedUsers`            | `[]`                                        | 单聊 openid 白名单。**空 = 一个都不放行**                                                       |
 | `blockedSenders`          | `[]`                                        | 发送者 openid 黑名单。只拦 @ 触发，**不影响消息入库**                                           |
 | `historyDbPath`           | `$DSH_HOME/storages/dsh-yashiro/history.db` | 群历史库。留空即用默认路径                                                                      |
-| `announceNewMessageCount` | `true`                                      | @ 时附带「自你上次开口以来群里还有几条新消息」                                                  |
+| `announceNewMessageCount` | `true`                                      | @ 时附带「上次唤醒投递到 #编号；此后新增 N 条没 @ 你的消息」——那个编号可以直接喂给 `qqbot_history` 的 `after_seq` |
 | `busyDelivery`            | `'steer'`                                   | 它正在跑回合时新 @ 进来的消息：`steer` 插队（下个 step 就被看到）／`queue` 排队（等下一个回合） |
 | `approvers`               | `[]`                                        | 谁能点审批卡片的「允许一次」（openid 白名单）。**空 = 群里任何人都能点**（与腾讯官方插件一致）  |
 | `approvalTimeoutSeconds`  | `300`                                       | 审批卡片无人处理多久后按「拒绝」收场                                                            |

@@ -102,3 +102,51 @@ describe("buildUserText：单聊", () => {
     assert.ok(!text.includes(msg.senderId), text);
   });
 });
+
+describe("buildUserText：唤醒锚点", () => {
+  const msg = normalizeInbound("app", quotedImage);
+
+  it("有锚点就一定写出来，哪怕这期间没人说话", () => {
+    const text = buildUserText(msg, {
+      lastDeliveredSeq: 124,
+      newSinceLastWake: 0,
+    });
+    assert.ok(
+      text.includes("（你上次被唤醒时投递到 #124；此后群里没有新消息。）"),
+      text,
+    );
+  });
+
+  it("有新消息时把条数一起说", () => {
+    const text = buildUserText(msg, {
+      lastDeliveredSeq: 124,
+      newSinceLastWake: 3,
+    });
+    assert.ok(
+      text.includes(
+        "你上次被唤醒时投递到 #124；此后群里新增 3 条没 @ 你的消息。",
+      ),
+      text,
+    );
+  });
+
+  it("拿不到条数（关了 announceNewMessageCount）时只写锚点", () => {
+    const text = buildUserText(msg, { lastDeliveredSeq: 124 });
+    assert.ok(text.includes("（你上次被唤醒时投递到 #124。）"), text);
+  });
+
+  it("首次唤醒没有锚点，退回只说条数", () => {
+    const text = buildUserText(msg, { newSinceLastWake: 2 });
+    assert.ok(
+      text.includes("（自你上次被唤醒以来，群里还有 2 条没 @ 你的消息。）"),
+      text,
+    );
+    assert.ok(!text.includes("投递到"), text);
+  });
+
+  it("既没锚点也没新消息时整段不出现", () => {
+    const text = buildUserText(msg, {});
+    assert.ok(!text.includes("新消息"), text);
+    assert.ok(!text.includes("投递到"), text);
+  });
+});

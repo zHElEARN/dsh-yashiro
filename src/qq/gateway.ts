@@ -246,6 +246,9 @@ export function normalizeInbound(
     mentionsBot: isBotMentioned(msg),
     ...(mentions ? { mentions } : {}),
     quotedContent: quoted ? formatContent(quoted, msg.mentions) : undefined,
+    // 这两个平台序号只用来在历史里解析"谁引用了谁"，没有它引用就只剩内容
+    ...(msg.msgIdx ? { msgIdx: String(msg.msgIdx) } : {}),
+    ...(msg.refMsgIdx ? { quotedMsgIdx: String(msg.refMsgIdx) } : {}),
     attachments: attachments.length > 0 ? attachments : undefined,
     rawEventType: msg.rawEventType,
     timestamp: msg.timestamp,
