@@ -80,7 +80,6 @@ const sentFiles = [];
 const gateway = {
   async send(peer, text) {
     sent.push({ ...peer, text });
-    return 1;
   },
   async sendFile(peer, localPath) {
     sentFiles.push({ ...peer, localPath });
@@ -162,11 +161,18 @@ describe("qqbot_history", () => {
 });
 
 describe("qqbot_send", () => {
-  it("发出去并返回条数", async () => {
+  it("发出去（不再切分、也不再回报条数）", async () => {
     sent.length = 0;
     const result = await createSendTool(deps).execute({ text: "收到" }, {});
-    assert.equal(result.sent, 1);
+    assert.deepEqual(result, {});
     assert.deepEqual(sent, [{ scope: "group", peerId: "G1", text: "收到" }]);
+  });
+
+  it("超长文本原样交给网关，由它抛错（不在这里截断）", async () => {
+    sent.length = 0;
+    const long = "x".repeat(6000);
+    await createSendTool(deps).execute({ text: long }, {});
+    assert.equal(sent[0]?.text.length, 6000);
   });
 
   it("自己发的内容也落库，标成 SELF / OUTBOUND", async () => {
@@ -197,6 +203,14 @@ describe("qqbot_send_file", () => {
     const last = latest();
     assert.equal(last?.content, "[文件] report.pdf（2.0KB）");
     assert.equal(last?.rawEventType, "OUTBOUND");
+    assert.deepEqual(last?.attachments, [
+      {
+        contentType: "application/pdf",
+        from: "current",
+        filename: "report.pdf",
+        size: 2048,
+      },
+    ]);
   });
 
   it("绝对路径原样透传", async () => {

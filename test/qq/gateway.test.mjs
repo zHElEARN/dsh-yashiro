@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
-  chunkText,
   classifyMedia,
   formatContent,
   inspectFileForSend,
@@ -164,23 +163,6 @@ describe("normalizeInbound", () => {
       normalizeInbound("1905501006", { ...inbound, kind: "guild" }),
       null,
     );
-  });
-});
-
-describe("chunkText", () => {
-  const many = Array.from({ length: 400 }, (_, i) => `第${i}行内容`).join("\n");
-
-  it("短文本不切", () => {
-    assert.equal(chunkText("abc", 4500).length, 1);
-  });
-
-  it("切分后无超长", () => {
-    assert.ok(chunkText(many, 200).every((c) => c.length <= 200));
-  });
-
-  it("切分后内容无损", () => {
-    const joined = chunkText(many, 200).join("\n").replace(/\s/g, "");
-    assert.equal(joined, many.replace(/\s/g, ""));
   });
 });
 

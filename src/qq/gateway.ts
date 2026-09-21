@@ -31,9 +31,6 @@ const GROUP_MESSAGE_INTENT = 1 << 24;
 
 const SANDBOX_BASE_URL = "https://sandbox.api.sgroup.qq.com";
 
-/** 单条消息最大字符数，超出自动切分 */
-const SEND_CHUNK_LIMIT = 4500;
-
 /** 发送文件时按扩展名选的富媒体类型 */
 export type MediaKind = "image" | "video" | "voice" | "file";
 
@@ -370,16 +367,15 @@ export class YashiroGateway {
     }
   }
 
-  /** 主动发送（不依赖 msg_id），超长自动切分 */
-  async send(peer: PeerRef, text: string): Promise<number> {
-    const target = qqTarget(peer);
-    let sent = 0;
-    for (const chunk of chunkText(text, SEND_CHUNK_LIMIT)) {
-      if (chunk.trim().length === 0) continue;
-      await this.bot.sendText(target, chunk);
-      sent += 1;
-    }
-    return sent;
+  /**
+   * 主动发送（不依赖 msg_id）。超长不切分也不预检 —— 断点交给模型，
+   * 长度由平台裁决（超了报 40054007，错误原样上抛给模型）。
+   */
+  async send(peer: PeerRef, text: string): Promise<void> {
+    await this.bot.sendText(qqTarget(peer), text);
+    this.logger.info(
+      `已发送（${text.length} 字符）→ ${peer.scope} ${peer.peerId}`,
+    );
   }
 
   /**
@@ -393,7 +389,7 @@ export class YashiroGateway {
    */
   async sendFile(peer: PeerRef, localPath: string): Promise<SentFile> {
     const inspected = inspectFileForSend(localPath);
-    const { kind, fileName } = inspected;
+    const { kind, fileName, fileSize } = inspected;
 
     const target = qqTarget(peer);
     const source = { localPath };
@@ -402,6 +398,9 @@ export class YashiroGateway {
     else if (kind === "voice") await this.bot.sendVoice(target, source);
     else await this.bot.sendFile(target, source, { fileName });
 
+    this.logger.info(
+      `已发送文件 ${fileName}（${formatSize(fileSize)}）→ ${peer.scope} ${peer.peerId}`,
+    );
     return inspected;
   }
 }
@@ -409,26 +408,4 @@ export class YashiroGateway {
 /** QQ SDK 的入参叫 targetId，插件内部一律叫 peerId */
 function qqTarget(peer: PeerRef): { scope: Scope; targetId: string } {
   return { scope: peer.scope, targetId: peer.peerId };
-}
-
-/** 优先在换行 / 句号 / 空格处断开，切点太靠前就硬切 */
-export function chunkText(text: string, limit: number): string[] {
-  const normalized = text.replace(/\r\n/g, "\n").trim();
-  if (normalized.length <= limit) return [normalized];
-
-  const chunks: string[] = [];
-  let rest = normalized;
-  while (rest.length > limit) {
-    const window = rest.slice(0, limit);
-    const cut = Math.max(
-      window.lastIndexOf("\n"),
-      window.lastIndexOf("。"),
-      window.lastIndexOf(" "),
-    );
-    const at = cut > limit * 0.5 ? cut + 1 : limit;
-    chunks.push(rest.slice(0, at));
-    rest = rest.slice(at);
-  }
-  if (rest.length > 0) chunks.push(rest);
-  return chunks;
 }

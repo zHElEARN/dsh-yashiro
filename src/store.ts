@@ -193,7 +193,11 @@ export class HistoryStore {
    * message_id 是合成的：出站没有平台 id，而 `(app_id, message_id)` 是唯一索引，
    * 用 uuid 才不会让同一毫秒内的两条发言互相顶掉。
    */
-  appendOutbound(key: ChatKey, content: string): void {
+  appendOutbound(
+    key: ChatKey,
+    content: string,
+    attachments?: AttachmentInfo[],
+  ): void {
     this.append({
       ...key,
       messageId: `outbound-${randomUUID()}`,
@@ -201,6 +205,7 @@ export class HistoryStore {
       senderName: "你（机器人）",
       content,
       mentionsBot: false,
+      ...(attachments?.length ? { attachments } : {}),
       rawEventType: "OUTBOUND",
       timestamp: platformNowIso(),
     });

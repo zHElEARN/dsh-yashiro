@@ -4,8 +4,11 @@
  * 它们通过闭包绑定到这个 agent 所属的群/单聊，agent 不能指定目标 —— 免得它发错群。
  */
 import { resolve } from "node:path";
-
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import {
+  getMimeType,
+  TEXT_CHUNK_LIMIT,
+} from "@tencent-connect/qqbot-nodejs/protocol";
 
 import type { Config } from "../core/config.js";
 import { formatSize, truncate, whereLabel } from "../core/format.js";
@@ -162,7 +165,9 @@ export function createSendTool(deps: ToolDeps) {
   const key = chatKey(config.appId, peer);
   return defineTool({
     name: "qqbot_send",
-    description: "把一条消息发送到当前 QQ 群或单聊，内容按 markdown 渲染。",
+    description:
+      "把一条消息发送到当前 QQ 群或单聊，内容按 markdown 渲染。" +
+      `单条上限约 ${TEXT_CHUNK_LIMIT} 字符，更长的内容拆成多次调用分别发送。`,
     parameters: {
       text: {
         type: "string",
@@ -174,25 +179,16 @@ export function createSendTool(deps: ToolDeps) {
       schema: {
         type: "object",
         additionalProperties: false,
-        properties: {
-          sent: {
-            type: "integer",
-            required: true,
-            description: "实际发出的消息条数",
-          },
-        },
+        properties: {},
       },
-      render: (_args, value) => [
-        {
-          type: "text",
-          text: `已发出 ${value.sent} 条消息到${whereLabel(peer.scope)}里。`,
-        },
+      render: () => [
+        { type: "text", text: `已发送到${whereLabel(peer.scope)}里。` },
       ],
     },
     async execute(args) {
-      const sent = await gateway.send(peer, args.text);
+      await gateway.send(peer, args.text);
       store.appendOutbound(key, args.text);
-      return { sent };
+      return {};
     },
   });
 }
@@ -239,10 +235,19 @@ export function createSendFileTool(deps: ToolDeps) {
       const abs = resolve(config.cwd?.trim() || process.cwd(), raw);
 
       const sent = await gateway.sendFile(peer, abs);
-      // 和 qqbot_send 一样落库：agent 事后翻历史时才知道自己发过什么
+      // 和 qqbot_send 一样落库：agent 事后翻历史时才知道自己发过什么。
+      // 附件也结构化记一笔，和入站消息的历史呈现对齐。
       store.appendOutbound(
         key,
         `[文件] ${sent.fileName}（${formatSize(sent.fileSize)}）`,
+        [
+          {
+            contentType: getMimeType(abs),
+            from: "current",
+            filename: sent.fileName,
+            size: sent.fileSize,
+          },
+        ],
       );
       return sent;
     },
