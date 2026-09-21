@@ -14,6 +14,7 @@ QQ 只是感官和发声器官，dsh agent 才是主体。
 ## 验收
 
 - 改动源码或测试后必须跑验收，编译是验收的一部分，不是可选项。
-- 验收只跑 `pnpm test`。它一条命令跑完 typecheck、编译、lint 和全部用例。
+- 验收只跑 `pnpm test`。它一条命令跑完 lint、typecheck、编译和全部用例。
 - 不得用 `pnpm test:only`、单独 `tsc` 或手写 `node --test` 替代 `pnpm test`。
-- lint 是硬门禁：报 error 即验收失败，必须修。确需例外时在那一行用带理由的 `// biome-ignore` 豁免，不降级整条规则。
+- lint 是硬门禁：报 error 即验收失败，必须修；warning 只提示，不拦验收。
+- 确需例外时在那一行用带理由的 `// biome-ignore lint/<规则名>: 理由` 豁免，不降级整条规则。
