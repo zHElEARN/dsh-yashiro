@@ -21,12 +21,6 @@ export interface Config {
   blockedSenders: string[]
   /** 留空落在 `$DSH_HOME/storages/dsh-yashiro/history.db` */
   historyDbPath?: string
-  /** 单次 qqbot_history 查询默认返回条数 */
-  historyDefaultLimit: number
-  /** 单次 qqbot_history 查询允许返回的最大条数 */
-  historyMaxLimit: number
-  /** qqbot_send 单条消息最大字符数，超出自动切分 */
-  sendChunkLimit: number
   /** @ 时是否附带告诉 agent「自你上次开口以来群里还有几条新消息」 */
   announceNewMessageCount: boolean
   /** 允许点审批按钮的 openid 白名单。空数组 = 群里任何人都能点，填了则平台侧和回执处各校验一次 */
@@ -50,9 +44,6 @@ export const Config: Schema<Config> = Schema.object({
   allowedUsers: Schema.array(Schema.string()).default([]),
   blockedSenders: Schema.array(Schema.string()).default([]),
   historyDbPath: Schema.string(),
-  historyDefaultLimit: Schema.number().default(30),
-  historyMaxLimit: Schema.number().default(200),
-  sendChunkLimit: Schema.number().default(4500),
   announceNewMessageCount: Schema.boolean().default(true),
   approvers: Schema.array(Schema.string()).default([]),
   approvalTimeoutSeconds: Schema.number().default(300),

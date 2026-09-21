@@ -5,7 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { HistoryStore } from '../../dist/store.js'
-import { createAgentTools, createHistoryTool, createSendTool } from '../../dist/agent/tools.js'
+import {
+  createAgentTools,
+  createHistoryTool,
+  createSendTool,
+  HISTORY_DEFAULT_LIMIT,
+  HISTORY_MAX_LIMIT,
+} from '../../dist/agent/tools.js'
 
 const dbPath = join(tmpdir(), `yashiro-tools-${process.pid}-${Date.now()}.db`)
 const store = new HistoryStore(dbPath)
@@ -37,7 +43,22 @@ for (let i = 0; i < 5; i += 1) {
 }
 store.append({ ...base, messageId: 'long', content: 'x'.repeat(900), mentionsBot: false, timestamp: '2026-09-20T18:09:00+08:00' })
 
-const config = { appId: APP, historyDefaultLimit: 3, historyMaxLimit: 4 }
+/**
+ * 填充数据：条数要顶过 HISTORY_MAX_LIMIT，否则「默认条数」和「上限夹取」这两个边界
+ * 会因为库里一共就没几条而失去意义。时间一律早于上面那个窗口，窗口内的断言不受影响。
+ */
+const ANCHOR_TS = Date.parse('2026-09-20T18:00:00+08:00')
+for (let i = 0; i < HISTORY_MAX_LIMIT; i += 1) {
+  store.append({
+    ...base,
+    messageId: `f${i}`,
+    content: `第 ${i} 条填充消息`,
+    mentionsBot: false,
+    timestamp: new Date(ANCHOR_TS - (i + 1) * 60_000).toISOString(),
+  })
+}
+
+const config = { appId: APP }
 const sent = []
 const gateway = {
   async send(scope, peerId, text) {
@@ -50,21 +71,21 @@ const deps = { store, gateway, config, scope: 'group', peerId: 'G1' }
 describe('qqbot_history', () => {
   it('不传 limit 时用默认条数', async () => {
     const result = await createHistoryTool(deps).execute({}, {})
-    assert.equal(result.count, 3)
+    assert.equal(result.count, HISTORY_DEFAULT_LIMIT)
   })
 
   it('limit 被夹在上限内', async () => {
     const result = await createHistoryTool(deps).execute({ limit: 999 }, {})
-    assert.equal(result.count, 4)
+    assert.equal(result.count, HISTORY_MAX_LIMIT)
   })
 
   it('结果按时间正序', async () => {
-    const result = await createHistoryTool(deps).execute({}, {})
+    const result = await createHistoryTool(deps).execute({ limit: 3 }, {})
     assert.deepEqual(
       result.messages.map((m) => m.sender),
       ['Zhe_Learn', 'Zhe_Learn', 'Zhe_Learn'],
     )
-    // 默认取最近 3 条（h3、h4、超长那条），并按时间正序给出
+    // 取最近 3 条（h3、h4、超长那条），并按时间正序给出
     assert.equal(result.messages[0].content, '第 3 条消息')
     assert.equal(result.messages[1].content, '第 4 条消息')
   })

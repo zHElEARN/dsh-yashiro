@@ -22,6 +22,12 @@ export interface ToolDeps {
 /** 单条消息在工具结果里的最大字符数，避免一次查询把上下文撑爆 */
 const PER_MESSAGE_CHARS = 400
 
+/** qqbot_history 不传 limit 时的默认条数 */
+export const HISTORY_DEFAULT_LIMIT = 30
+
+/** qqbot_history 单次查询允许返回的最大条数 */
+export const HISTORY_MAX_LIMIT = 200
+
 function truncate(text: string, limit: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length <= limit ? flat : `${flat.slice(0, limit)}…（已截断）`
@@ -47,7 +53,7 @@ export function createHistoryTool(deps: ToolDeps) {
       },
       limit: {
         type: 'number',
-        description: `返回条数，默认 ${config.historyDefaultLimit}，上限 ${config.historyMaxLimit}。`,
+        description: `返回条数，默认 ${HISTORY_DEFAULT_LIMIT}，上限 ${HISTORY_MAX_LIMIT}。`,
       },
     },
     output: {
@@ -86,8 +92,8 @@ export function createHistoryTool(deps: ToolDeps) {
     },
     async execute(args) {
       const limit = Math.min(
-        Math.max(1, Math.floor(args.limit ?? config.historyDefaultLimit)),
-        config.historyMaxLimit,
+        Math.max(1, Math.floor(args.limit ?? HISTORY_DEFAULT_LIMIT)),
+        HISTORY_MAX_LIMIT,
       )
       const since =
         args.since_minutes !== undefined && Number.isFinite(args.since_minutes)

@@ -28,9 +28,6 @@
         blockedSenders: []
         # 群历史库路径；留空 = $DSH_HOME/storages/dsh-yashiro/history.db
         historyDbPath: ''
-        historyDefaultLimit: 30
-        historyMaxLimit: 200
-        sendChunkLimit: 4500
         announceNewMessageCount: true
         # 你正在跑回合时新 @ 进来的消息：steer = 插队（默认），queue = 排队等下一个回合
         busyDelivery: steer

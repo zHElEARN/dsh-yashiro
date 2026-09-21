@@ -18,6 +18,9 @@ const GROUP_MESSAGE_INTENT = 1 << 24
 
 const SANDBOX_BASE_URL = 'https://sandbox.api.sgroup.qq.com'
 
+/** 单条消息最大字符数，超出自动切分 */
+const SEND_CHUNK_LIMIT = 4500
+
 interface MentionLike {
   is_you?: boolean
   bot?: boolean
@@ -222,7 +225,7 @@ export class YashiroGateway {
 
   /** 主动发送（不依赖 msg_id），超长自动切分 */
   async send(scope: 'group' | 'c2c', targetId: string, text: string): Promise<number> {
-    const chunks = chunkText(text, this.config.sendChunkLimit)
+    const chunks = chunkText(text, SEND_CHUNK_LIMIT)
     let sent = 0
     for (const chunk of chunks) {
       if (chunk.trim().length === 0) continue
