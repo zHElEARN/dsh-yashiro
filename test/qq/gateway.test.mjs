@@ -142,15 +142,21 @@ describe("normalizeInbound", () => {
     assert.equal(msg.mentionsBot, true);
   });
 
-  it("单聊 peerId = senderId", () => {
+  it("单聊 peerId = senderId，且每条都算唤醒", () => {
     const msg = normalizeInbound("1905501006", {
       ...inbound,
       kind: "c2c",
       groupOpenid: undefined,
       content: "hi",
+      mentions: undefined,
     });
     assert.equal(msg.scope, "c2c");
     assert.equal(msg.peerId, inbound.senderId);
+    assert.equal(
+      msg.mentionsBot,
+      true,
+      "单聊没有 @ 的概念，消息就是冲着机器人来的",
+    );
   });
 
   it("频道事件被忽略", () => {

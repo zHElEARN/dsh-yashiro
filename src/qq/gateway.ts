@@ -180,13 +180,12 @@ function toMentionInfo(mentions?: MentionLike[]): MentionInfo[] | undefined {
 }
 
 function isBotMentioned(msg: InboundMessage): boolean {
-  // 老形态：平台直接推的 @ 事件，必然 @ 了机器人
-  if (
-    msg.rawEventType === "GROUP_AT_MESSAGE_CREATE" ||
-    msg.rawEventType === "AT_MESSAGE_CREATE"
-  ) {
-    return true;
-  }
+  // 单聊没有 @ 这回事：每一条都是冲着机器人说的，都要唤醒
+  if (msg.kind === "c2c") return true;
+
+  // 老形态：平台只推 @ 事件，事件名本身就说明 @ 了机器人
+  if (msg.rawEventType === "GROUP_AT_MESSAGE_CREATE") return true;
+
   if (Array.isArray(msg.mentions)) {
     return msg.mentions.some((m) => m?.is_you === true);
   }

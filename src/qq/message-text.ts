@@ -45,7 +45,8 @@ export function buildUserText(
   msg: StoredMessage,
   options: UserTextOptions = {},
 ): string {
-  const who = msg.senderName ?? msg.senderId;
+  // 单聊的 payload 没有昵称、只有一长串 openid，当人名读不通，用「对方」代替
+  const who = msg.senderName ?? (msg.scope === "c2c" ? "对方" : msg.senderId);
 
   const lines = [
     `${who} 在${whereLabel(msg.scope)}里 @ 了你：`,

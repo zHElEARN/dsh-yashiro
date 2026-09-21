@@ -349,7 +349,7 @@ export function apply(ctx: Context, config: Config): void {
 
     const access = decideAccess(msg, config);
     if (access.action === "deny-peer") {
-      logger.debug(
+      logger.info(
         `会话未放行（${access.reason}）：${peer.scope} ${peer.peerId}`,
       );
       return;
@@ -436,6 +436,7 @@ export function apply(ctx: Context, config: Config): void {
       );
     } catch (err) {
       logger.error(`唤醒 agent 失败: ${describeError(err)}`);
+      await sendAndRecord(peer, "这条消息没能交给 agent，详情见插件日志。");
     }
   }
 

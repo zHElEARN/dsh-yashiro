@@ -87,3 +87,18 @@ describe("buildUserText：语音与多来源", () => {
     assert.ok(!buildUserText(plain).includes("带附件"));
   });
 });
+
+describe("buildUserText：单聊", () => {
+  it("拿不到昵称时用「对方」，不把 openid 当人名", () => {
+    const msg = normalizeInbound("app", {
+      ...quotedImage,
+      kind: "c2c",
+      groupOpenid: undefined,
+      senderName: undefined,
+      content: "在吗",
+    });
+    const text = buildUserText(msg);
+    assert.match(text, /^对方 在单聊里 @ 了你：/);
+    assert.ok(!text.includes(msg.senderId), text);
+  });
+});

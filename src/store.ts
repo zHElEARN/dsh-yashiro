@@ -39,6 +39,7 @@ export interface StoredMessage {
   senderName?: string;
   /** `@openid` 已换成 `@昵称`、表情已收敛成 `[表情]` */
   content: string;
+  /** 这条消息是不是冲着机器人说的：群里是 @ 了它，单聊恒为真 */
   mentionsBot: boolean;
   /** 这条消息 @ 了谁 */
   mentions?: MentionInfo[];
