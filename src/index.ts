@@ -383,6 +383,7 @@ export function apply(ctx: Context, config: Config): void {
       logger.info(`[dsh-yashiro] 无会话，已提示 ${msg.scope} ${msg.peerId} 用 /new`)
       try {
         await gateway.send(msg.scope, msg.peerId, NO_SESSION_TEXT)
+        recordOutbound(msg.scope, msg.peerId, NO_SESSION_TEXT)
       } catch (err) {
         logger.error(`[dsh-yashiro] 发送「无会话」提示失败: ${describeError(err)}`)
       }
@@ -424,11 +425,9 @@ export function apply(ctx: Context, config: Config): void {
       )
       if (agent === undefined) {
         logger.error(`[dsh-yashiro] 会话连不上：${shortSessionId(current.sessionId)}`)
-        await gateway.send(
-          msg.scope,
-          msg.peerId,
-          `当前会话（${shortSessionId(current.sessionId)}）连不上，用 /new 或 /switch 换一条。`,
-        )
+        const notice = `当前会话（${shortSessionId(current.sessionId)}）连不上，用 /new 或 /switch 换一条。`
+        await gateway.send(msg.scope, msg.peerId, notice)
+        recordOutbound(msg.scope, msg.peerId, notice)
         return
       }
       logger.debug(`[trace] 会话就绪 session=${String(agent.id)}，准备投递`)

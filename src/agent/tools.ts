@@ -11,7 +11,7 @@ import type { Config } from '../core/config.js'
 import { formatTime } from '../core/time.js'
 import type { YashiroGateway } from '../qq/gateway.js'
 import { describeAttachment, formatSize } from '../qq/message-text.js'
-import type { HistoryStore } from '../store.js'
+import type { AttachmentInfo, HistoryStore } from '../store.js'
 
 export interface ToolDeps {
   store: HistoryStore
@@ -33,6 +33,18 @@ export const HISTORY_MAX_LIMIT = 200
 function truncate(text: string, limit: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length <= limit ? flat : `${flat.slice(0, limit)}…（已截断）`
+}
+
+/**
+ * 历史里一条附件的呈现：类型/文件名/尺寸一行说清，后面跟 URL 与语音转写。
+ *
+ * 刻意不截断 —— URL 截一半就废了。条数天然很少（平台一条消息带不了几个附件）。
+ */
+function describeAttachmentForHistory(attachment: AttachmentInfo): string {
+  const parts = [describeAttachment(attachment)]
+  if (attachment.url) parts.push(attachment.url)
+  if (attachment.asrText) parts.push(`转写：${attachment.asrText}`)
+  return parts.join('  ')
 }
 
 export function createHistoryTool(deps: ToolDeps) {
@@ -76,6 +88,11 @@ export function createHistoryTool(deps: ToolDeps) {
                 sender: { type: 'string', required: true },
                 content: { type: 'string', required: true },
                 quoted: { type: 'string' },
+                attachments: {
+                  type: 'array',
+                  description: '这条消息带的附件。只有元信息，插件不下载文件本体',
+                  items: { type: 'string' },
+                },
               },
             },
           },
@@ -85,7 +102,10 @@ export function createHistoryTool(deps: ToolDeps) {
         const listed = value.messages
           .map((m) => {
             const quoted = m.quoted ? `\n  ↳ 引用了：${m.quoted}` : ''
-            return `[${m.time}] ${m.sender}: ${m.content}${quoted}`
+            const files = (m.attachments ?? [])
+              .map((a) => `\n  ↳ 附件：${a}`)
+              .join('')
+            return `[${m.time}] ${m.sender}: ${m.content}${quoted}${files}`
           })
           .join('\n')
         const body = value.count === 0 ? '没有查到符合条件的消息。' : listed
@@ -122,6 +142,9 @@ export function createHistoryTool(deps: ToolDeps) {
           sender: row.senderName ?? row.senderId,
           content: truncate(row.content, PER_MESSAGE_CHARS),
           ...(row.quotedContent ? { quoted: truncate(row.quotedContent, PER_MESSAGE_CHARS) } : {}),
+          ...(row.attachments?.length
+            ? { attachments: row.attachments.map(describeAttachmentForHistory) }
+            : {}),
         })),
       }
     },

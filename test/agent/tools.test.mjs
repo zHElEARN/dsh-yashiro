@@ -59,6 +59,28 @@ for (let i = 0; i < HISTORY_MAX_LIMIT; i += 1) {
   })
 }
 
+// 附件消息。时间早于所有填充数据，不会挤进上面那几个「最近 N 条」的断言
+store.append({
+  ...base,
+  messageId: 'm-attach',
+  content: '看这张图',
+  mentionsBot: true,
+  quotedContent: '被引用的原话',
+  attachments: [
+    {
+      contentType: 'image/jpeg',
+      from: 'current',
+      url: 'https://example.com/a.jpg',
+      filename: 'a.jpg',
+      size: 20480,
+      width: 800,
+      height: 600,
+    },
+    { contentType: 'voice', from: 'quoted', url: 'https://example.com/v.silk', asrText: '今天天气不错' },
+  ],
+  timestamp: '2026-09-19T10:00:00+08:00',
+})
+
 const config = { appId: APP }
 const sent = []
 const sentFiles = []
@@ -105,6 +127,29 @@ describe('qqbot_history', () => {
   it('sender_name 作为展示名', async () => {
     const result = await createHistoryTool(deps).execute({}, {})
     assert.equal(result.messages[0].sender, 'Zhe_Learn')
+  })
+
+  it('带附件的消息把附件也带出来（含 URL 与语音转写）', async () => {
+    const result = await createHistoryTool(deps).execute({ query: '看这张图' }, {})
+    assert.equal(result.count, 1)
+    assert.deepEqual(result.messages[0].attachments, [
+      '图片 a.jpg 800x600 20.0KB  https://example.com/a.jpg',
+      '语音  https://example.com/v.silk  转写：今天天气不错',
+    ])
+  })
+
+  it('附件在 render 里缩进成 ↳ 附件：行', async () => {
+    const tool = createHistoryTool(deps)
+    const out = await tool.execute({ query: '看这张图' }, {})
+    const text = tool.output.render({}, out)[0].text
+    assert.match(text, /\n {2}↳ 附件：图片 a\.jpg 800x600 20\.0KB {2}https:\/\/example\.com\/a\.jpg/)
+    assert.match(text, /\n {2}↳ 附件：语音 {2}https:\/\/example\.com\/v\.silk {2}转写：今天天气不错/)
+  })
+
+  it('没有附件的消息根本不带 attachments 字段', async () => {
+    const result = await createHistoryTool(deps).execute({ query: '第 3 条消息' }, {})
+    assert.equal(result.count, 1)
+    assert.ok(!('attachments' in result.messages[0]))
   })
 })
 
