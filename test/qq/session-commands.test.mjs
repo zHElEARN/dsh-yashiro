@@ -3,11 +3,9 @@ import { describe, it } from "node:test";
 
 import {
   buildContextText,
-  buildCurrentText,
   buildListText,
-  buildNewSessionText,
+  buildSessionText,
   buildSwitchErrorText,
-  buildSwitchOkText,
   buildUsageText,
   isSessionOperator,
   matchSession,
@@ -17,8 +15,12 @@ import {
   shortSessionId,
 } from "../../dist/qq/session-commands.js";
 
-/** 固定时间格式，避免用例依赖本地时区 */
-const formatTime = (ts) => `T${ts}`;
+/** 展示时间固定按 +08:00 格式化（见 core/time.ts），所以下面断言里写死这个口径 */
+const at = (iso) => Date.parse(iso);
+const T1800 = at("2026-09-20T18:00:00+08:00");
+const T1802 = at("2026-09-20T18:02:00+08:00");
+const T1805 = at("2026-09-20T18:05:00+08:00");
+const T1820 = at("2026-09-20T18:20:00+08:00");
 
 const line = (id, updatedAt, current = false) => ({
   id,
@@ -28,7 +30,7 @@ const line = (id, updatedAt, current = false) => ({
 });
 
 describe("parseSessionCommand", () => {
-  it("四条指令的基本形态", () => {
+  it("五条指令的基本形态", () => {
     assert.deepEqual(parseSessionCommand("/current"), { kind: "current" });
     assert.deepEqual(parseSessionCommand("/new"), { kind: "new" });
     assert.deepEqual(parseSessionCommand("/switch abc123"), {
@@ -53,41 +55,23 @@ describe("parseSessionCommand", () => {
     assert.equal(parseSessionCommand("帮我看看 /new 这个命令"), undefined);
     assert.equal(parseSessionCommand("/newxxx"), undefined);
     assert.equal(parseSessionCommand("/id"), undefined, "/id 有自己的处理分支");
+    assert.equal(parseSessionCommand(""), undefined);
   });
 
   it("参数不合法回用法，不猜", () => {
-    assert.deepEqual(parseSessionCommand("/current 1"), {
-      kind: "usage",
-      command: "current",
-    });
-    assert.deepEqual(parseSessionCommand("/new 1"), {
-      kind: "usage",
-      command: "new",
-    });
-    assert.deepEqual(parseSessionCommand("/switch"), {
-      kind: "usage",
-      command: "switch",
-    });
-    assert.deepEqual(parseSessionCommand("/switch a b"), {
-      kind: "usage",
-      command: "switch",
-    });
-    assert.deepEqual(parseSessionCommand("/list abc"), {
-      kind: "usage",
-      command: "list",
-    });
-    assert.deepEqual(parseSessionCommand("/list 0"), {
-      kind: "usage",
-      command: "list",
-    });
-    assert.deepEqual(parseSessionCommand("/list -1"), {
-      kind: "usage",
-      command: "list",
-    });
-    assert.deepEqual(parseSessionCommand("/context 1"), {
-      kind: "usage",
-      command: "context",
-    });
+    for (const [input, command] of [
+      ["/current 1", "current"],
+      ["/new 1", "new"],
+      ["/context 1", "context"],
+      ["/switch", "switch"],
+      ["/switch a b", "switch"],
+      ["/list abc", "list"],
+      ["/list 0", "list"],
+      ["/list -1", "list"],
+      ["/list 1 2", "list"],
+    ]) {
+      assert.deepEqual(parseSessionCommand(input), { kind: "usage", command });
+    }
   });
 });
 
@@ -104,45 +88,52 @@ describe("isSessionOperator", () => {
 
 describe("会话指令文案", () => {
   it("没有会话时统一提示 /new", () => {
-    const ctx = { sessions: [], total: 0, formatTime };
-    assert.equal(buildCurrentText(ctx), NO_SESSION_TEXT);
-    assert.equal(buildListText(ctx, 1), NO_SESSION_TEXT);
+    assert.equal(buildListText({ sessions: [], total: 0 }, 1), NO_SESSION_TEXT);
   });
 
-  it("/current 报短 ID 和创建时间", () => {
-    const ctx = {
-      current: line("a".repeat(64), 100),
-      sessions: [],
-      total: 1,
-      formatTime,
-    };
+  it("/current 报短 ID 和最近使用时间", () => {
     assert.equal(
-      buildCurrentText(ctx),
-      "当前会话\nSession ID: aaaaaaaa\n创建：T100",
+      buildSessionText("当前会话", line("a".repeat(64), T1800), "最近使用"),
+      "当前会话\nSession ID: aaaaaaaa\n最近使用：2026-09-20 18:00:00",
+    );
+  });
+
+  it("/switch 与 /new 只差标题和时间标签", () => {
+    const target = line("c".repeat(64), T1820);
+    assert.equal(
+      buildSessionText("已切换：", target, "最近使用"),
+      "已切换：\nSession ID: cccccccc\n最近使用：2026-09-20 18:20:00",
+    );
+    assert.equal(
+      buildSessionText("已创建并切换：", target, "创建"),
+      "已创建并切换：\nSession ID: cccccccc\n创建：2026-09-20 18:20:00",
     );
   });
 
   it("/list 标出当前、带分页头", () => {
-    const ctx = {
-      current: line("a".repeat(64), 300, true),
-      sessions: [line("a".repeat(64), 300, true), line("b".repeat(64), 200)],
-      total: 2,
-      formatTime,
-    };
     assert.equal(
-      buildListText(ctx, 1),
+      buildListText(
+        {
+          current: line("a".repeat(64), T1805, true),
+          sessions: [
+            line("a".repeat(64), T1805, true),
+            line("b".repeat(64), T1802),
+          ],
+          total: 2,
+        },
+        1,
+      ),
       [
         "会话列表（第 1/1 页，共 2 条，按最近使用排序）",
-        "▶ aaaaaaaa  T300  ← 当前",
-        "  bbbbbbbb  T200",
+        "▶ aaaaaaaa  2026-09-20 18:05:00  ← 当前",
+        "  bbbbbbbb  2026-09-20 18:02:00",
       ].join("\n"),
     );
   });
 
   it("/list 页码越界单独报，不静默", () => {
-    const ctx = { sessions: [], total: 3, formatTime };
     assert.equal(
-      buildListText(ctx, 2),
+      buildListText({ sessions: [], total: 3 }, 2),
       "第 2 页不存在，一共 1 页（共 3 条会话）。",
     );
   });
@@ -152,25 +143,16 @@ describe("会话指令文案", () => {
     const sessions = Array.from({ length: SESSIONS_PER_PAGE }, (_, i) =>
       line(`${i}`.padStart(8, "0"), i),
     );
-    const ctx = { sessions, total: 25, formatTime };
-    assert.match(buildListText(ctx, 1), /第 1\/3 页，共 25 条/);
+    assert.match(
+      buildListText({ sessions, total: 25 }, 1),
+      /第 1\/3 页，共 25 条/,
+    );
   });
 
   it("/switch 前缀找不到与重名分别有话说", () => {
     assert.match(buildSwitchErrorText("zzz", []), /没找到会话 zzz/);
     const two = [line("a".repeat(64), 1), line(`aa${"b".repeat(62)}`, 2)];
     assert.match(buildSwitchErrorText("a", two), /匹配到 2 条会话/);
-  });
-  it("/switch 成功与 /new 都报短 ID", () => {
-    const target = line("c".repeat(64), 500);
-    assert.equal(
-      buildSwitchOkText(target, formatTime),
-      "已切换：Session ID cccccccc\n创建：T500",
-    );
-    assert.equal(
-      buildNewSessionText(target, formatTime),
-      "已创建并切换：\nSession ID: cccccccc\n创建：T500",
-    );
   });
 
   it("用法提示逐条齐全", () => {
@@ -234,13 +216,13 @@ describe("buildContextText", () => {
   const full = {
     sessionId:
       "1806fe0ded4b3fa1f43f22fbd456fe915dd1e13f90da1624ac3058a45ea0af56",
-    createdAt: 100,
+    createdAt: T1800,
     model: "deepseek-official/deepseek-flash",
     contextTokens: 306122,
     contextWindow: 1000000,
     totalTokens: 307200,
     cacheReadTokens: 305920,
-    lastActivityAt: 200,
+    lastActivityAt: T1805,
     running: false,
     turns: 11,
     steps: 299,
@@ -248,45 +230,44 @@ describe("buildContextText", () => {
     toolCalls: 375,
   };
 
-  it("跑过的会话：七行，短 ID、占用比例、累计、历史、最后活动", () => {
+  it("跑过的会话：短 ID、占用比例、累计、历史、最后活动", () => {
     assert.equal(
-      buildContextText(full, formatTime),
+      buildContextText(full),
       [
         "会话上下文",
         "Session ID: 1806fe0d",
-        "创建：T100",
+        "创建：2026-09-20 18:00:00",
         "模型：deepseek-official/deepseek-flash",
         "上下文：306.1k / 1m（31%）",
         "累计用量：307.2k（缓存命中 305.9k，99%）",
         "历史：11 轮 · 299 步 · 14 条你的消息 · 375 次工具调用",
-        "最后活动：T200",
+        "最后活动：2026-09-20 18:05:00",
       ].join("\n"),
     );
   });
 
   it("正在跑回合时在最后活动那行标注", () => {
     assert.match(
-      buildContextText({ ...full, running: true }, formatTime),
-      /最后活动：T200（正在跑回合）/,
+      buildContextText({ ...full, running: true }),
+      /最后活动：2026-09-20 18:05:00（正在跑回合）/,
     );
   });
 
   it("/new 之后没跑过：模型与占用都显示未知，不编数字", () => {
-    const fresh = {
-      sessionId: "a".repeat(64),
-      createdAt: 300,
-      running: false,
-      turns: 0,
-      steps: 0,
-      userMessages: 0,
-      toolCalls: 0,
-    };
     assert.equal(
-      buildContextText(fresh, formatTime),
+      buildContextText({
+        sessionId: "a".repeat(64),
+        createdAt: T1800,
+        running: false,
+        turns: 0,
+        steps: 0,
+        userMessages: 0,
+        toolCalls: 0,
+      }),
       [
         "会话上下文",
         "Session ID: aaaaaaaa",
-        "创建：T300",
+        "创建：2026-09-20 18:00:00",
         "模型：未知（还没跑过回合）",
         "上下文：还没跑过回合",
         "历史：0 轮 · 0 步 · 0 条你的消息 · 0 次工具调用",
@@ -296,27 +277,26 @@ describe("buildContextText", () => {
   });
 
   it("缓存命中不足 100% 时不许四舍五入成 100%", () => {
-    const text = buildContextText(
-      { ...full, totalTokens: 307200, cacheReadTokens: 305920 },
-      formatTime,
-    );
+    const text = buildContextText({
+      ...full,
+      totalTokens: 307200,
+      cacheReadTokens: 305920,
+    });
     assert.match(text, /99%/, text);
     assert.ok(!text.includes("100%"), text);
   });
 
   it("窗口未知时只报占用，不报比例", () => {
-    const text = buildContextText(
-      { ...full, contextWindow: undefined },
-      formatTime,
+    assert.match(
+      buildContextText({ ...full, contextWindow: undefined }),
+      /上下文：306\.1k\n/,
     );
-    assert.match(text, /上下文：306\.1k\n/);
   });
 
   it("创建时间缺失时报未知", () => {
-    const text = buildContextText(
-      { ...full, createdAt: undefined },
-      formatTime,
+    assert.match(
+      buildContextText({ ...full, createdAt: undefined }),
+      /创建：未知/,
     );
-    assert.match(text, /创建：未知/);
   });
 });

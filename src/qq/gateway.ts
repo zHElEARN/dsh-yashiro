@@ -20,8 +20,11 @@ import {
 import { FULL_INTENTS } from "@tencent-connect/qqbot-nodejs/protocol";
 
 import type { Config } from "../core/config.js";
+import { describeError } from "../core/errors.js";
+import { formatSize } from "../core/format.js";
+import type { Logger } from "../core/logger.js";
+import type { PeerRef, Scope } from "../core/types.js";
 import type { AttachmentInfo, StoredMessage } from "../store.js";
-import { formatSize } from "./message-text.js";
 
 /** 官方文档说 GROUP_MESSAGE (1<<25) 就够，但收非 @ 消息必须额外带上这一位 */
 const GROUP_MESSAGE_INTENT = 1 << 24;
@@ -131,7 +134,7 @@ export function stripMentionMarkers(content: string): string {
     .trim();
 }
 
-export function isBotMentioned(msg: InboundMessage): boolean {
+function isBotMentioned(msg: InboundMessage): boolean {
   // 老形态：平台直接推的 @ 事件，必然 @ 了机器人
   if (
     msg.rawEventType === "GROUP_AT_MESSAGE_CREATE" ||
@@ -168,7 +171,7 @@ export function normalizeInbound(
   appId: string,
   msg: InboundMessage,
 ): StoredMessage | null {
-  const scope: "group" | "c2c" = msg.kind === "c2c" ? "c2c" : "group";
+  const scope: Scope = msg.kind === "c2c" ? "c2c" : "group";
   if (msg.kind !== "group" && msg.kind !== "c2c") return null;
 
   const peerId = scope === "group" ? (msg.groupOpenid ?? "") : msg.senderId;
@@ -208,71 +211,63 @@ export function normalizeInbound(
 export interface GatewayHandlers {
   /** 回调时消息还没入库，落库由 handler 自己负责 */
   onMessage(msg: StoredMessage): void;
-  onReady(): void;
-  onError(err: unknown): void;
+  /** 连接就绪 / 连接出错，插件不关心时可以不给 */
+  onReady?(): void;
+  onError?(err: unknown): void;
   /** 审批按钮被点击。返回 ack code（0 成功 / 4 没权限）；undefined = 不是本插件的按钮 */
   onInteraction?(event: InteractionEvent): number | undefined;
 }
 
 export class YashiroGateway {
   private readonly bot: QQBot;
-  private readonly log: (msg: string) => void;
   private started = false;
 
   constructor(
     config: Config,
     handlers: GatewayHandlers,
-    logger: {
-      info(msg: string): void;
-      warn(msg: string): void;
-      error(msg: string): void;
-    },
+    private readonly logger: Logger,
   ) {
-    const log = (msg: string) => {
-      if (config.debug) logger.info(msg);
-    };
-    this.log = log;
-
     this.bot = new QQBot({
       appId: config.appId,
       appSecret: config.appSecret,
       baseUrl: config.sandbox ? SANDBOX_BASE_URL : undefined,
       intents: FULL_INTENTS | GROUP_MESSAGE_INTENT,
       markdownSupport: true,
+      // QQ SDK 很吵，debug 与 info 都压到 debug 档，只有 warn / error 直达
       logger: {
-        debug: (m?: unknown) => log(`[qqbot:debug] ${stringify(m)}`),
-        info: (m?: unknown) => log(`[qqbot] ${stringify(m)}`),
-        warn: (m?: unknown) => logger.warn(`[dsh-yashiro] ${stringify(m)}`),
-        error: (m?: unknown) => logger.error(`[dsh-yashiro] ${stringify(m)}`),
+        debug: (m?: unknown) => logger.debug(`[qqbot] ${describeError(m)}`),
+        info: (m?: unknown) => logger.debug(`[qqbot] ${describeError(m)}`),
+        warn: (m?: unknown) => logger.warn(`[qqbot] ${describeError(m)}`),
+        error: (m?: unknown) => logger.error(`[qqbot] ${describeError(m)}`),
       },
     });
 
     this.bot.on("ready", () => {
-      logger.info("[dsh-yashiro] QQ WebSocket 已连接（READY）");
-      handlers.onReady();
+      logger.info("QQ WebSocket 已连接（READY）");
+      handlers.onReady?.();
     });
 
     this.bot.on("resumed", () =>
-      log("[dsh-yashiro] QQ WebSocket 会话已恢复（RESUMED）"),
+      logger.debug("QQ WebSocket 会话已恢复（RESUMED）"),
     );
 
     this.bot.on("error", (err: unknown) => {
-      logger.error(`[dsh-yashiro] QQ 连接错误: ${stringify(err)}`);
-      handlers.onError(err);
+      logger.error(`QQ 连接错误: ${describeError(err)}`);
+      handlers.onError?.(err);
     });
 
     this.bot.on("message", (_ctx: unknown, msg: InboundMessage) => {
       try {
         const normalized = normalizeInbound(config.appId, msg);
         if (!normalized) return;
-        log(
-          `[dsh-yashiro] 收到消息 type=${normalized.rawEventType} peer=${normalized.peerId} ` +
+        logger.debug(
+          `收到消息 type=${normalized.rawEventType} peer=${normalized.peerId} ` +
             `from=${normalized.senderName ?? normalized.senderId} mention=${normalized.mentionsBot} ` +
             `content=${JSON.stringify(normalized.content.slice(0, 80))}`,
         );
         handlers.onMessage(normalized);
       } catch (err) {
-        logger.error(`[dsh-yashiro] 处理入站消息失败: ${stringify(err)}`);
+        logger.error(`处理入站消息失败: ${describeError(err)}`);
       }
     });
 
@@ -283,25 +278,24 @@ export class YashiroGateway {
       try {
         code = handlers.onInteraction?.(event) ?? 3;
       } catch (err) {
-        logger.error(`[dsh-yashiro] 处理按钮点击失败: ${stringify(err)}`);
+        logger.error(`处理按钮点击失败: ${describeError(err)}`);
       }
       void this.bot
         .acknowledgeInteraction(event.id, code)
         .catch((err: unknown) => {
-          logger.error(`[dsh-yashiro] 按钮点击回执失败: ${stringify(err)}`);
+          logger.error(`按钮点击回执失败: ${describeError(err)}`);
         });
     });
   }
 
   /** 发带内联键盘的 markdown（审批卡片）。主动发送，不依赖 msg_id */
   async sendCard(
-    scope: "group" | "c2c",
-    targetId: string,
+    peer: PeerRef,
     text: string,
     keyboard?: InlineKeyboard,
   ): Promise<void> {
     await this.bot.sendMarkdown(
-      { scope, targetId },
+      qqTarget(peer),
       text,
       keyboard === undefined ? undefined : { keyboard },
     );
@@ -312,7 +306,7 @@ export class YashiroGateway {
     if (this.started) return;
     this.started = true;
     void this.bot.start().catch((err: unknown) => {
-      this.log(`[dsh-yashiro] 网关退出: ${stringify(err)}`);
+      this.logger.debug(`网关退出: ${describeError(err)}`);
     });
   }
 
@@ -327,16 +321,12 @@ export class YashiroGateway {
   }
 
   /** 主动发送（不依赖 msg_id），超长自动切分 */
-  async send(
-    scope: "group" | "c2c",
-    targetId: string,
-    text: string,
-  ): Promise<number> {
-    const chunks = chunkText(text, SEND_CHUNK_LIMIT);
+  async send(peer: PeerRef, text: string): Promise<number> {
+    const target = qqTarget(peer);
     let sent = 0;
-    for (const chunk of chunks) {
+    for (const chunk of chunkText(text, SEND_CHUNK_LIMIT)) {
       if (chunk.trim().length === 0) continue;
-      await this.bot.sendText({ scope, targetId }, chunk);
+      await this.bot.sendText(target, chunk);
       sent += 1;
     }
     return sent;
@@ -351,15 +341,11 @@ export class YashiroGateway {
    *
    * 通用文件消息需要机器人有「文件消息」权限，没有的话平台会拒绝，错误原样上抛给 agent。
    */
-  async sendFile(
-    scope: "group" | "c2c",
-    targetId: string,
-    localPath: string,
-  ): Promise<SentFile> {
+  async sendFile(peer: PeerRef, localPath: string): Promise<SentFile> {
     const inspected = inspectFileForSend(localPath);
     const { kind, fileName } = inspected;
 
-    const target = { scope, targetId };
+    const target = qqTarget(peer);
     const source = { localPath };
     if (kind === "image") await this.bot.sendImage(target, source);
     else if (kind === "video") await this.bot.sendVideo(target, source);
@@ -368,6 +354,11 @@ export class YashiroGateway {
 
     return inspected;
   }
+}
+
+/** QQ SDK 的入参叫 targetId，插件内部一律叫 peerId */
+function qqTarget(peer: PeerRef): { scope: Scope; targetId: string } {
+  return { scope: peer.scope, targetId: peer.peerId };
 }
 
 /** 优先在换行 / 句号 / 空格处断开，切点太靠前就硬切 */
@@ -390,14 +381,4 @@ export function chunkText(text: string, limit: number): string[] {
   }
   if (rest.length > 0) chunks.push(rest);
   return chunks;
-}
-
-function stringify(value: unknown): string {
-  if (value instanceof Error) return `${value.name}: ${value.message}`;
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }

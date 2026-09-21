@@ -9,24 +9,22 @@ import {
   encodeApprovalButton,
 } from "../../dist/qq/approval.js";
 
-const request = {
-  agent: {
-    id: "s1",
-    session: {
-      events: [
-        {
-          type: "tool/call",
-          data: {
-            callId: "c1",
-            arguments: JSON.stringify({
-              command: "rm -rf /tmp/x",
-              description: "清理",
-            }),
-          },
-        },
-      ],
-    },
+/** session 侧只用到 seq + eventAt，dsh 的 Session 就是这么给的 */
+const sessionOf = (events) => ({
+  seq: events.length,
+  eventAt: (i) => events[i],
+});
+
+const toolCall = (command) => ({
+  type: "tool/call",
+  data: {
+    callId: "c1",
+    arguments: JSON.stringify({ command, description: "清理" }),
   },
+});
+
+const request = {
+  agent: { id: "s1", session: sessionOf([toolCall("rm -rf /tmp/x")]) },
   toolName: "bash",
   callId: "c1",
   reason: "需要写工作区外的文件",
@@ -87,25 +85,25 @@ describe("commandOf：从 session log 回显被 gate 的命令", () => {
     assert.equal(commandOf(request), "rm -rf /tmp/x");
   });
 
+  it("同一个 callId 出现多次时取最后一条", () => {
+    const session = sessionOf([
+      toolCall("echo 旧的"),
+      { type: "tool/result", data: {} },
+      toolCall("echo 新的"),
+    ]);
+    assert.equal(
+      commandOf({ ...request, agent: { id: "s1", session } }),
+      "echo 新的",
+    );
+  });
+
   it("callId 对不上返回 undefined", () => {
     assert.equal(commandOf({ ...request, callId: "nope" }), undefined);
   });
 
-  it("rc.2 形状（eventAt + seq）也能读", () => {
-    const toolCall = request.agent.session.events[0];
-    const rc2 = {
-      ...request,
-      agent: {
-        id: "s1",
-        session: { seq: 1, eventAt: (i) => (i === 0 ? toolCall : undefined) },
-      },
-    };
-    assert.equal(commandOf(rc2), "rm -rf /tmp/x");
-  });
-
-  it("两种形状都读不到 → undefined 且不抛错", () => {
+  it("日志里没有对应事件时返回 undefined，不抛错", () => {
     assert.equal(
-      commandOf({ ...request, agent: { id: "s1", session: {} } }),
+      commandOf({ ...request, agent: { id: "s1", session: sessionOf([]) } }),
       undefined,
     );
   });

@@ -45,7 +45,7 @@
 pnpm test
 ```
 
-测试按模块拆在 `test/` 下，与 `src/` 同构，用 Node 内置的 `node:test`（无额外依赖）。`pnpm test` 会先跑 biome（`pnpm lint`）、再 typecheck、再 build，最后跑 `dist/` 上的用例 —— 所以它同时能抓到「改了 src 忘了重新构建」和格式/import 顺序跑偏这类问题。
+测试按模块拆在 `test/` 下，与 `src/` 同构（临时库/临时目录这类公共夹具在 `test/helpers.mjs`），用 Node 内置的 `node:test`（无额外依赖）。`pnpm test` 会先跑 biome（`pnpm lint`）、再 typecheck、再 build，最后跑 `dist/` 上的用例 —— 所以它同时能抓到「改了 src 忘了重新构建」和格式/import 顺序跑偏这类问题。
 
 ## 调试
 

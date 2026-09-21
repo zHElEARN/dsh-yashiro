@@ -4,6 +4,7 @@
  * 附件只搬平台的元信息（URL、类型、尺寸、语音转写），插件不下载也不持久化：
  * 下不下、什么时候下由 agent 自己决定，QQ 的 URL 带时效，过期就算了。
  */
+import { formatSize, whereLabel } from "../core/format.js";
 import type { AttachmentInfo, StoredMessage } from "../store.js";
 
 const CONTENT_TYPE_LABELS: Array<[RegExp, string]> = [
@@ -14,17 +15,11 @@ const CONTENT_TYPE_LABELS: Array<[RegExp, string]> = [
   [/^file$/, "文件"],
 ];
 
-export function attachmentKindLabel(contentType: string): string {
+function attachmentKindLabel(contentType: string): string {
   for (const [pattern, label] of CONTENT_TYPE_LABELS) {
     if (pattern.test(contentType)) return label;
   }
   return "附件";
-}
-
-export function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
 export function describeAttachment(attachment: AttachmentInfo): string {
@@ -50,11 +45,10 @@ export function buildUserText(
   msg: StoredMessage,
   options: UserTextOptions = {},
 ): string {
-  const where = msg.scope === "group" ? "群里" : "单聊里";
   const who = msg.senderName ?? msg.senderId;
 
   const lines = [
-    `${who} 在${where} @ 了你：`,
+    `${who} 在${whereLabel(msg.scope)}里 @ 了你：`,
     "",
     msg.content.trim().length > 0 ? msg.content : "（这条消息没有文字内容）",
   ];

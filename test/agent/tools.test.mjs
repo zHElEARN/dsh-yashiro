@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { describe, it } from "node:test";
 import {
   createAgentTools,
   createHistoryTool,
@@ -11,17 +8,9 @@ import {
   HISTORY_DEFAULT_LIMIT,
   HISTORY_MAX_LIMIT,
 } from "../../dist/agent/tools.js";
-import { HistoryStore } from "../../dist/store.js";
+import { tempStore } from "../helpers.mjs";
 
-const dbPath = join(tmpdir(), `yashiro-tools-${process.pid}-${Date.now()}.db`);
-const store = new HistoryStore(dbPath);
-
-after(() => {
-  store.close();
-  rmSync(dbPath, { force: true });
-  rmSync(`${dbPath}-wal`, { force: true });
-  rmSync(`${dbPath}-shm`, { force: true });
-});
+const store = tempStore("tools");
 
 const APP = "1905501006";
 const base = {
@@ -95,16 +84,24 @@ const config = { appId: APP };
 const sent = [];
 const sentFiles = [];
 const gateway = {
-  async send(scope, peerId, text) {
-    sent.push({ scope, peerId, text });
+  async send(peer, text) {
+    sent.push({ ...peer, text });
     return 1;
   },
-  async sendFile(scope, peerId, localPath) {
-    sentFiles.push({ scope, peerId, localPath });
+  async sendFile(peer, localPath) {
+    sentFiles.push({ ...peer, localPath });
     return { kind: "file", fileName: "report.pdf", fileSize: 2048 };
   },
 };
-const deps = { store, gateway, config, scope: "group", peerId: "G1" };
+/** 这个群最新的一条（search 默认由近及远） */
+const latest = () => store.search({ appId: APP, peerId: "G1", limit: 1 })[0];
+
+const deps = {
+  store,
+  gateway,
+  config,
+  peer: { scope: "group", peerId: "G1" },
+};
 
 describe("qqbot_history", () => {
   it("不传 limit 时用默认条数", async () => {
@@ -185,7 +182,7 @@ describe("qqbot_send", () => {
 
   it("自己发的内容也落库，标成 SELF / OUTBOUND", async () => {
     await createSendTool(deps).execute({ text: "我查完了" }, {});
-    const last = store.recent(APP, "G1", 10).at(-1);
+    const last = latest();
     assert.equal(last?.content, "我查完了");
     assert.equal(last?.senderId, "SELF");
     assert.equal(last?.rawEventType, "OUTBOUND");
@@ -208,7 +205,7 @@ describe("qqbot_send_file", () => {
       { scope: "group", peerId: "G1", localPath: "/tmp/report.pdf" },
     ]);
 
-    const last = store.recent(APP, "G1", 1).at(-1);
+    const last = latest();
     assert.equal(last?.content, "[文件] report.pdf（2.0KB）");
     assert.equal(last?.rawEventType, "OUTBOUND");
   });
@@ -237,7 +234,7 @@ describe("qqbot_send_file", () => {
   });
 
   it("发送失败时不落库", async () => {
-    const before = store.recent(APP, "G1", 1).at(-1)?.seq;
+    const before = latest()?.seq;
     const failing = {
       ...deps,
       gateway: {
@@ -252,7 +249,7 @@ describe("qqbot_send_file", () => {
         createSendFileTool(failing).execute({ file_path: "/tmp/x.pdf" }, {}),
       /没有文件消息权限/,
     );
-    assert.equal(store.recent(APP, "G1", 1).at(-1)?.seq, before);
+    assert.equal(latest()?.seq, before);
   });
 });
 

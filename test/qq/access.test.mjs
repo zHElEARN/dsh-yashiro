@@ -102,7 +102,6 @@ describe("isIdCommand", () => {
 describe("buildIdReply", () => {
   it("群聊：三行，Group OpenID 是群 openid", () => {
     const reply = buildIdReply({
-      scope: "group",
       peerId: GROUP,
       senderId: USER,
       senderName: "Zhe_Learn",
@@ -115,7 +114,7 @@ describe("buildIdReply", () => {
   });
 
   it("单聊：没有群，Group OpenID 给会话 id", () => {
-    const reply = buildIdReply({ scope: "c2c", peerId: USER, senderId: USER });
+    const reply = buildIdReply({ peerId: USER, senderId: USER });
     assert.deepEqual(reply.split("\n"), [
       `Group OpenID: ${USER}`,
       `User OpenID: ${USER}`,
@@ -124,17 +123,14 @@ describe("buildIdReply", () => {
   });
 
   it("只有三行，不带任何说明文本", () => {
-    for (const scope of ["group", "c2c"]) {
-      const reply = buildIdReply({
-        scope,
-        peerId: USER,
-        senderId: USER,
-        senderName: "Zhe_Learn",
-      });
-      assert.equal(reply.split("\n").length, 3, reply);
-      assert.ok(!reply.includes("allowedGroups"), reply);
-      assert.ok(!reply.includes("allowedUsers"), reply);
-      assert.ok(!reply.includes("blockedSenders"), reply);
-    }
+    const reply = buildIdReply({
+      peerId: USER,
+      senderId: USER,
+      senderName: "Zhe_Learn",
+    });
+    assert.equal(reply.split("\n").length, 3, reply);
+    assert.ok(!reply.includes("allowedGroups"), reply);
+    assert.ok(!reply.includes("allowedUsers"), reply);
+    assert.ok(!reply.includes("blockedSenders"), reply);
   });
 });

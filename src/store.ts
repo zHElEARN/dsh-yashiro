@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { platformNowIso } from "./core/time.js";
+import type { ChatKey, Scope } from "./core/types.js";
 
 /** 只记录平台给的元信息，不下载文件、不持久化 */
 export interface AttachmentInfo {
@@ -31,8 +32,7 @@ export interface AttachmentInfo {
 
 export interface StoredMessage {
   appId: string;
-  /** group = 群聊，c2c = 单聊 */
-  scope: "group" | "c2c";
+  scope: Scope;
   /** 群 openid 或用户 openid */
   peerId: string;
   messageId: string;
@@ -59,7 +59,7 @@ export interface HistoryRow extends StoredMessage {
 
 export interface SearchOptions {
   appId: string;
-  scope?: "group" | "c2c";
+  scope?: Scope;
   peerId?: string;
   /** 子串匹配消息正文与引用正文 */
   query?: string;
@@ -189,16 +189,9 @@ export class HistoryStore {
    * message_id 是合成的：出站没有平台 id，而 `(app_id, message_id)` 是唯一索引，
    * 用 uuid 才不会让同一毫秒内的两条发言互相顶掉。
    */
-  appendOutbound(
-    appId: string,
-    scope: "group" | "c2c",
-    peerId: string,
-    content: string,
-  ): void {
+  appendOutbound(key: ChatKey, content: string): void {
     this.append({
-      appId,
-      scope,
-      peerId,
+      ...key,
       messageId: `outbound-${randomUUID()}`,
       senderId: "SELF",
       senderName: "你（机器人）",
@@ -212,18 +205,14 @@ export class HistoryStore {
   // ── 会话绑定：一个 QQ 会话（群/单聊）可以有多条 dsh 会话，其中一条是 current ──
 
   /** 当前会话；这个群/单聊还没建过任何会话时返回 undefined */
-  getCurrentSession(
-    appId: string,
-    scope: "group" | "c2c",
-    peerId: string,
-  ): SessionBinding | undefined {
+  getCurrentSession(key: ChatKey): SessionBinding | undefined {
     const row = this.db
       .prepare(
         `SELECT app_id, scope, peer_id, epoch, session_id, created_at, updated_at
            FROM session_bindings
           WHERE app_id = ? AND scope = ? AND peer_id = ? AND is_current = 1`,
       )
-      .get(appId, scope, peerId);
+      .get(key.appId, key.scope, key.peerId);
     return row === undefined ? undefined : toSessionBinding(row);
   }
 
@@ -233,24 +222,21 @@ export class HistoryStore {
    * 是 `MAX(epoch) + 1` 而不是「会话条数 + 1」：会话万一被删掉一条，条数就会跟已有的
    * epoch 撞上，派生出的 SessionId 会指向别的会话。
    */
-  nextEpoch(appId: string, scope: "group" | "c2c", peerId: string): number {
+  nextEpoch(key: ChatKey): number {
     const row = this.db
       .prepare(
         `SELECT COALESCE(MAX(epoch), 0) AS max_epoch
            FROM session_bindings WHERE app_id = ? AND scope = ? AND peer_id = ?`,
       )
-      .get(appId, scope, peerId) as { max_epoch: number } | undefined;
+      .get(key.appId, key.scope, key.peerId) as
+      | { max_epoch: number }
+      | undefined;
     return Number(row?.max_epoch ?? 0) + 1;
   }
 
   /** 新建一条会话（epoch 取当前最大值 +1）并切成 current，返回新绑定 */
-  createSession(
-    appId: string,
-    scope: "group" | "c2c",
-    peerId: string,
-    sessionId: string,
-  ): SessionBinding {
-    const epoch = this.nextEpoch(appId, scope, peerId);
+  createSession(key: ChatKey, sessionId: string): SessionBinding {
+    const epoch = this.nextEpoch(key);
     const now = this.now();
 
     this.db
@@ -259,9 +245,9 @@ export class HistoryStore {
            (app_id, scope, peer_id, epoch, session_id, created_at, updated_at, is_current)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
       )
-      .run(appId, scope, peerId, epoch, sessionId, now, now);
+      .run(key.appId, key.scope, key.peerId, epoch, sessionId, now, now);
 
-    this.setCurrentSession(appId, scope, peerId, epoch);
+    this.setCurrentSession(key, epoch);
     return { epoch, sessionId, createdAt: now, updatedAt: now };
   }
 
@@ -269,12 +255,8 @@ export class HistoryStore {
    * 切换 current。先确认目标存在再清旧标记 —— 否则目标不存在时会把现有指针一起清掉，
    * 群的当前会话变成「无」，@ 就不再回应了。
    */
-  setCurrentSession(
-    appId: string,
-    scope: "group" | "c2c",
-    peerId: string,
-    epoch: number,
-  ): boolean {
+  setCurrentSession(key: ChatKey, epoch: number): boolean {
+    const { appId, scope, peerId } = key;
     const exists = this.db
       .prepare(
         "SELECT 1 AS ok FROM session_bindings WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?",
@@ -297,28 +279,18 @@ export class HistoryStore {
   }
 
   /** 刷新「最近使用」；列表就是按它倒序排的，每次投递后都要调 */
-  touchSession(
-    appId: string,
-    scope: "group" | "c2c",
-    peerId: string,
-    epoch: number,
-  ): void {
+  touchSession(key: ChatKey, epoch: number): void {
     this.db
       .prepare(
         `UPDATE session_bindings SET updated_at = ?
           WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?`,
       )
-      .run(this.now(), appId, scope, peerId, epoch);
+      .run(this.now(), key.appId, key.scope, key.peerId, epoch);
   }
 
   /** 某个群/单聊的全部会话，按最近使用倒序；page 从 1 开始 */
-  listSessions(
-    appId: string,
-    scope: "group" | "c2c",
-    peerId: string,
-    page: number,
-    perPage: number,
-  ): SessionPage {
+  listSessions(key: ChatKey, page: number, perPage: number): SessionPage {
+    const { appId, scope, peerId } = key;
     const where = "app_id = ? AND scope = ? AND peer_id = ?";
     const countRow = this.db
       .prepare(`SELECT COUNT(*) AS n FROM session_bindings WHERE ${where}`)
@@ -387,47 +359,15 @@ export class HistoryStore {
     return rows.map(toHistoryRow);
   }
 
-  /** 某个会话最近 n 条，按时间正序；含机器人自己的发言 */
-  recent(appId: string, peerId: string, limit: number): HistoryRow[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM (
-           SELECT seq, app_id, scope, peer_id, message_id, sender_id, sender_name, content,
-                  mentions_bot, quoted_content, attachments, raw_event_type, timestamp, ts
-             FROM messages
-            WHERE app_id = ? AND peer_id = ?
-            ORDER BY ts DESC, seq DESC
-            LIMIT ?
-         ) ORDER BY ts ASC, seq ASC`,
-      )
-      .all(appId, peerId, Math.max(1, Math.floor(limit)));
-    return rows.map(toHistoryRow);
-  }
-
   /** 该会话自某个时间点以来有多少条消息；excludeMentions 为真时只数非 @ 的 */
-  countSince(
-    appId: string,
-    peerId: string,
-    sinceMs: number,
-    excludeMentions = false,
-  ): number {
+  countSince(key: ChatKey, sinceMs: number, excludeMentions = false): number {
     const sql = excludeMentions
       ? "SELECT COUNT(*) AS n FROM messages WHERE app_id = ? AND peer_id = ? AND ts > ? AND mentions_bot = 0"
       : "SELECT COUNT(*) AS n FROM messages WHERE app_id = ? AND peer_id = ? AND ts > ?";
-    const row = this.db.prepare(sql).get(appId, peerId, sinceMs) as
+    const row = this.db.prepare(sql).get(key.appId, key.peerId, sinceMs) as
       | { n: number }
       | undefined;
     return row?.n ?? 0;
-  }
-
-  /** 该会话最后一条消息的时间（epoch ms），没有则 undefined */
-  lastTs(appId: string, peerId: string): number | undefined {
-    const row = this.db
-      .prepare(
-        "SELECT MAX(ts) AS ts FROM messages WHERE app_id = ? AND peer_id = ?",
-      )
-      .get(appId, peerId) as { ts: number | null } | undefined;
-    return row?.ts ?? undefined;
   }
 
   close(): void {

@@ -1,5 +1,5 @@
 /**
- * 挂给每个 agent 的两个工具。
+ * 挂给每个 agent 的三个工具。
  *
  * 它们通过闭包绑定到这个 agent 所属的群/单聊，agent 不能指定目标 —— 免得它发错群。
  */
@@ -8,17 +8,18 @@ import { resolve } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
 import type { Config } from "../core/config.js";
+import { formatSize, truncate, whereLabel } from "../core/format.js";
 import { formatTime } from "../core/time.js";
+import { chatKey, type PeerRef } from "../core/types.js";
 import type { YashiroGateway } from "../qq/gateway.js";
-import { describeAttachment, formatSize } from "../qq/message-text.js";
+import { describeAttachment } from "../qq/message-text.js";
 import type { AttachmentInfo, HistoryStore } from "../store.js";
 
 export interface ToolDeps {
   store: HistoryStore;
   gateway: YashiroGateway;
   config: Config;
-  scope: "group" | "c2c";
-  peerId: string;
+  peer: PeerRef;
 }
 
 /** 单条消息在工具结果里的最大字符数，避免一次查询把上下文撑爆 */
@@ -29,11 +30,6 @@ export const HISTORY_DEFAULT_LIMIT = 30;
 
 /** qqbot_history 单次查询允许返回的最大条数 */
 export const HISTORY_MAX_LIMIT = 200;
-
-function truncate(text: string, limit: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length <= limit ? flat : `${flat.slice(0, limit)}…（已截断）`;
-}
 
 /**
  * 历史里一条附件的呈现：类型/文件名/尺寸一行说清，后面跟 URL 与语音转写。
@@ -48,7 +44,8 @@ function describeAttachmentForHistory(attachment: AttachmentInfo): string {
 }
 
 export function createHistoryTool(deps: ToolDeps) {
-  const { store, config, scope, peerId } = deps;
+  const { store, config, peer } = deps;
+  const key = chatKey(config.appId, peer);
   return defineTool({
     name: "qqbot_history",
     description:
@@ -130,9 +127,9 @@ export function createHistoryTool(deps: ToolDeps) {
           : undefined;
 
       const rows = store.search({
-        appId: config.appId,
-        scope,
-        peerId,
+        appId: key.appId,
+        scope: key.scope,
+        peerId: key.peerId,
         ...(args.query ? { query: args.query } : {}),
         ...(args.sender ? { senderName: args.sender } : {}),
         ...(since !== undefined ? { since } : {}),
@@ -161,7 +158,8 @@ export function createHistoryTool(deps: ToolDeps) {
 }
 
 export function createSendTool(deps: ToolDeps) {
-  const { gateway, store, config, scope, peerId } = deps;
+  const { gateway, store, config, peer } = deps;
+  const key = chatKey(config.appId, peer);
   return defineTool({
     name: "qqbot_send",
     description: "把一条消息发送到当前 QQ 群或单聊，内容按 markdown 渲染。",
@@ -187,20 +185,21 @@ export function createSendTool(deps: ToolDeps) {
       render: (_args, value) => [
         {
           type: "text",
-          text: `已发出 ${value.sent} 条消息到${scope === "group" ? "群里" : "单聊"}。`,
+          text: `已发出 ${value.sent} 条消息到${whereLabel(peer.scope)}里。`,
         },
       ],
     },
     async execute(args) {
-      const sent = await gateway.send(scope, peerId, args.text);
-      store.appendOutbound(config.appId, scope, peerId, args.text);
+      const sent = await gateway.send(peer, args.text);
+      store.appendOutbound(key, args.text);
       return { sent };
     },
   });
 }
 
 export function createSendFileTool(deps: ToolDeps) {
-  const { gateway, store, config, scope, peerId } = deps;
+  const { gateway, store, config, peer } = deps;
+  const key = chatKey(config.appId, peer);
   return defineTool({
     name: "qqbot_send_file",
     description:
@@ -229,7 +228,7 @@ export function createSendFileTool(deps: ToolDeps) {
       render: (_args, value) => [
         {
           type: "text",
-          text: `已发送 ${value.fileName}（${formatSize(value.fileSize)}）到${scope === "group" ? "群里" : "单聊"}。`,
+          text: `已发送 ${value.fileName}（${formatSize(value.fileSize)}）到${whereLabel(peer.scope)}里。`,
         },
       ],
     },
@@ -239,12 +238,10 @@ export function createSendFileTool(deps: ToolDeps) {
       // 相对路径按 agent 的工作目录解析，与 SessionManager 给 agent 的 cwd 一致
       const abs = resolve(config.cwd?.trim() || process.cwd(), raw);
 
-      const sent = await gateway.sendFile(scope, peerId, abs);
+      const sent = await gateway.sendFile(peer, abs);
       // 和 qqbot_send 一样落库：agent 事后翻历史时才知道自己发过什么
       store.appendOutbound(
-        config.appId,
-        scope,
-        peerId,
+        key,
         `[文件] ${sent.fileName}（${formatSize(sent.fileSize)}）`,
       );
       return sent;

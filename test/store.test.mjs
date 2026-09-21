@@ -1,23 +1,15 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { describe, it } from "node:test";
 
-import { HistoryStore } from "../dist/store.js";
+import { tempStore } from "./helpers.mjs";
 
-const dbPath = join(tmpdir(), `yashiro-test-${process.pid}-${Date.now()}.db`);
-const store = new HistoryStore(dbPath);
+const store = tempStore("store");
 
-after(() => {
-  store.close();
-  rmSync(dbPath, { force: true });
-  rmSync(`${dbPath}-wal`, { force: true });
-  rmSync(`${dbPath}-shm`, { force: true });
-});
+const APP = "1905501006";
+const GROUP = { appId: APP, scope: "group", peerId: "G1" };
 
 const base = {
-  appId: "1905501006",
+  appId: APP,
   scope: "group",
   peerId: "G1",
   senderId: "U1",
@@ -102,48 +94,30 @@ describe("HistoryStore.search", () => {
   });
 });
 
-describe("HistoryStore.recent", () => {
-  it("按时间正序返回", () => {
-    const ids = store.recent("1905501006", "G1", 10).map((r) => r.messageId);
-    assert.equal(ids.join(","), "m1,m2,m3");
-  });
-});
-
 describe("HistoryStore.countSince", () => {
   it("只数非 @ 消息", () => {
-    assert.equal(store.countSince("1905501006", "G1", 0, true), 2);
+    assert.equal(store.countSince(GROUP, 0, true), 2);
   });
 
   it("不排除 @ 消息时数全部", () => {
-    assert.equal(store.countSince("1905501006", "G1", 0, false), 3);
+    assert.equal(store.countSince(GROUP, 0, false), 3);
   });
 
   it("时间窗生效", () => {
     assert.equal(
-      store.countSince(
-        "1905501006",
-        "G1",
-        Date.parse("2026-09-20T18:01:30+08:00"),
-        false,
-      ),
+      store.countSince(GROUP, Date.parse("2026-09-20T18:01:30+08:00"), false),
       1,
     );
   });
 });
 
-describe("HistoryStore.lastTs", () => {
-  it("返回该会话最后一条消息的时间", () => {
-    assert.equal(
-      store.lastTs("1905501006", "G1"),
-      Date.parse("2026-09-20T18:02:00+08:00"),
-    );
-  });
-});
+/** 这个群最新的一条（search 默认由近及远） */
+const latest = () => store.search({ ...GROUP, limit: 1 })[0];
 
 describe("HistoryStore.appendOutbound", () => {
   it("机器人自己的发言也入库，且标成 SELF / OUTBOUND", () => {
-    store.appendOutbound("1905501006", "group", "G1", "好的我去查");
-    const last = store.recent("1905501006", "G1", 10).at(-1);
+    store.appendOutbound(GROUP, "好的我去查");
+    const last = latest();
     assert.equal(last?.content, "好的我去查");
     assert.equal(last?.senderId, "SELF");
     assert.equal(last?.rawEventType, "OUTBOUND");
@@ -152,75 +126,59 @@ describe("HistoryStore.appendOutbound", () => {
 });
 
 describe("HistoryStore 会话绑定", () => {
-  const APP = "1905501006";
-  const PEER = "BIND-G1";
-  const OTHER = "BIND-G2";
+  const bind = (peerId) => ({ appId: APP, scope: "group", peerId });
+  const KEY = bind("BIND-G1");
+  const OTHER = bind("BIND-G2");
 
   it("还没建过会话时没有当前会话", () => {
-    assert.equal(store.getCurrentSession(APP, "group", PEER), undefined);
+    assert.equal(store.getCurrentSession(KEY), undefined);
   });
 
   it("新建即成为当前，epoch 从 1 递增", () => {
-    const first = store.createSession(APP, "group", PEER, "sid-1");
+    const first = store.createSession(KEY, "sid-1");
     assert.equal(first.epoch, 1);
-    assert.equal(
-      store.getCurrentSession(APP, "group", PEER)?.sessionId,
-      "sid-1",
-    );
+    assert.equal(store.getCurrentSession(KEY)?.sessionId, "sid-1");
 
-    const second = store.createSession(APP, "group", PEER, "sid-2");
+    const second = store.createSession(KEY, "sid-2");
     assert.equal(second.epoch, 2);
-    assert.equal(
-      store.getCurrentSession(APP, "group", PEER)?.sessionId,
-      "sid-2",
-    );
+    assert.equal(store.getCurrentSession(KEY)?.sessionId, "sid-2");
   });
 
   it("切回旧会话后当前会话跟着变", () => {
-    assert.equal(store.setCurrentSession(APP, "group", PEER, 1), true);
-    assert.equal(
-      store.getCurrentSession(APP, "group", PEER)?.sessionId,
-      "sid-1",
-    );
+    assert.equal(store.setCurrentSession(KEY, 1), true);
+    assert.equal(store.getCurrentSession(KEY)?.sessionId, "sid-1");
   });
 
   it("切到不存在的 epoch 返回 false，当前会话不动", () => {
-    assert.equal(store.setCurrentSession(APP, "group", PEER, 99), false);
-    assert.equal(
-      store.getCurrentSession(APP, "group", PEER)?.sessionId,
-      "sid-1",
-    );
+    assert.equal(store.setCurrentSession(KEY, 99), false);
+    assert.equal(store.getCurrentSession(KEY)?.sessionId, "sid-1");
   });
 
   it("会话按最近使用倒序，touch 能把一条顶上来", () => {
-    store.touchSession(APP, "group", PEER, 2);
+    store.touchSession(KEY, 2);
     assert.deepEqual(
-      store
-        .listSessions(APP, "group", PEER, 1, 10)
-        .sessions.map((s) => s.sessionId),
+      store.listSessions(KEY, 1, 10).sessions.map((s) => s.sessionId),
       ["sid-2", "sid-1"],
     );
-    store.touchSession(APP, "group", PEER, 1);
+    store.touchSession(KEY, 1);
     assert.deepEqual(
-      store
-        .listSessions(APP, "group", PEER, 1, 10)
-        .sessions.map((s) => s.sessionId),
+      store.listSessions(KEY, 1, 10).sessions.map((s) => s.sessionId),
       ["sid-1", "sid-2"],
     );
   });
 
   it("分页与总数", () => {
-    const page1 = store.listSessions(APP, "group", PEER, 1, 1);
+    const page1 = store.listSessions(KEY, 1, 1);
     assert.equal(page1.sessions.length, 1);
     assert.equal(page1.total, 2);
-    const page2 = store.listSessions(APP, "group", PEER, 2, 1);
+    const page2 = store.listSessions(KEY, 2, 1);
     assert.equal(page2.sessions.length, 1);
     assert.notEqual(page2.sessions[0].sessionId, page1.sessions[0].sessionId);
     assert.equal(page2.total, 2);
   });
 
   it("会话按群隔离，别的群看不到", () => {
-    assert.equal(store.getCurrentSession(APP, "group", OTHER), undefined);
-    assert.equal(store.listSessions(APP, "group", OTHER, 1, 10).total, 0);
+    assert.equal(store.getCurrentSession(OTHER), undefined);
+    assert.equal(store.listSessions(OTHER, 1, 10).total, 0);
   });
 });

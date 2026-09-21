@@ -10,6 +10,9 @@ import type {
   InteractionEvent,
 } from "@tencent-connect/qqbot-nodejs";
 
+import type { Logger } from "../core/logger.js";
+import type { PeerRef, Scope } from "../core/types.js";
+
 // ── 最小契约（结构化对齐 dsh-user-approval，但不硬依赖那个包） ──
 
 export type ApprovalOutcome =
@@ -24,17 +27,11 @@ interface ApprovalSessionEvent {
   data?: { callId?: unknown; arguments?: unknown };
 }
 
-/**
- * dsh rc.2 的 Session 没有 `events` 数组，只有 `eventAt(seq)` + `seq`；官方插件的契约
- * 写的是 `session.events`。两种都读，读不到就当「没有命令可回显」，不让回显拖垮审批。
- */
+/** dsh 的 Session 里我们只用到这两个成员：事件总数 + 按下标取事件 */
 interface ApprovalSessionLike {
-  /** 事件总数，rc.2 里就是日志偏移量 */
-  seq?: number;
-  /** 按下标取事件 */
-  eventAt?(seq: number): ApprovalSessionEvent | undefined;
-  /** 整份事件数组，官方插件的契约形状 */
-  events?: ApprovalSessionEvent[];
+  /** 事件总数，就是日志偏移量 */
+  seq: number;
+  eventAt(seq: number): ApprovalSessionEvent | undefined;
 }
 
 export interface ApprovalRequest {
@@ -47,25 +44,12 @@ export interface ApprovalRequest {
   signal?: AbortSignal;
 }
 
-/** 发卡片要知道发到哪 */
-export interface ApprovalTarget {
-  scope: "group" | "c2c";
-  peerId: string;
-}
-
 /** 发卡片与超时提示的出口，由 gateway 提供 */
 export type ApprovalSender = (
-  target: ApprovalTarget,
+  target: PeerRef,
   text: string,
   keyboard?: InlineKeyboard,
 ) => Promise<unknown>;
-
-export interface ApprovalLogger {
-  info(message: string): void;
-  warn(message: string): void;
-  error(message: string): void;
-  debug(message: string): void;
-}
 
 /** 只用到 cordis 的两个能力，便于测试时替身 */
 export interface ApprovalContext {
@@ -118,16 +102,9 @@ const COMMAND_CLIP = 500;
 export function commandOf(request: ApprovalRequest): string | undefined {
   if (request.callId === undefined) return undefined;
   const session = request.agent.session;
-  const events = Array.isArray(session.events) ? session.events : undefined;
-  const last =
-    events !== undefined
-      ? events.length - 1
-      : typeof session.seq === "number"
-        ? session.seq - 1
-        : -1;
 
-  for (let i = last; i >= 0; i -= 1) {
-    const event = events !== undefined ? events[i] : session.eventAt?.(i);
+  for (let i = session.seq - 1; i >= 0; i -= 1) {
+    const event = session.eventAt(i);
     if (event?.type !== "tool/call") continue;
     const data = event.data;
     if (String(data?.callId) !== String(request.callId)) continue;
@@ -219,51 +196,35 @@ export function buildApprovalKeyboard(
 /** pending 以 sessionId 为键：一个群可能有多条会话，按群查会串到别的会话上 */
 interface PendingApproval {
   sessionId: string;
-  target: ApprovalTarget;
+  target: PeerRef;
   resolve: (outcome: ApprovalOutcome) => void;
   timer: ReturnType<typeof setTimeout>;
   onAbort?: () => void;
   signal?: AbortSignal;
 }
 
-const DEFAULT_TIMEOUT_MS = 300_000;
-
 export interface ApprovalChannelDeps {
   /** 空数组 = 群里任何人都能点 */
-  approvers?: readonly string[];
-  /** 多久无人处理按拒绝收场（毫秒），缺省 5 分钟 */
-  timeoutMs?: number;
+  approvers: readonly string[];
+  /** 多久无人处理按拒绝收场（毫秒）；由配置的 approvalTimeoutSeconds 换算而来 */
+  timeoutMs: number;
   send: ApprovalSender;
   /** 不是本插件的会话返回 undefined，交回链上其他应答者 */
-  findTarget(sessionId: string): ApprovalTarget | undefined;
+  findTarget(sessionId: string): PeerRef | undefined;
   /** 这个群/单聊当前用的是哪条会话；没有会话时 undefined */
-  currentSessionOf(scope: "group" | "c2c", peerId: string): string | undefined;
-  logger: ApprovalLogger;
+  currentSessionOf(peer: PeerRef): string | undefined;
+  logger: Logger;
 }
 
 export class ApprovalChannel {
   private readonly pending = new Map<string, PendingApproval>();
-  private readonly approvers: readonly string[];
-  private readonly timeoutMs: number;
 
-  constructor(private readonly deps: ApprovalChannelDeps) {
-    // profile 层是整体替换 config 的，缺省字段在这里兜底，别让 undefined 落到渲染路径上
-    this.approvers = deps.approvers ?? [];
-    this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  }
+  constructor(private readonly deps: ApprovalChannelDeps) {}
 
   /** 注册 approval/request waterfall；没有 approval 服务时优雅停用 */
   install(ctx: ApprovalContext): void {
-    let hasApproval = false;
-    try {
-      hasApproval = ctx.get("approval") !== undefined;
-    } catch {
-      hasApproval = false;
-    }
-    if (!hasApproval) {
-      this.deps.logger.debug(
-        "[dsh-yashiro] 没有 approval 服务，QQ 审批通道停用",
-      );
+    if (ctx.get("approval") === undefined) {
+      this.deps.logger.debug("没有 approval 服务，QQ 审批通道停用");
       return;
     }
     ctx.on(
@@ -276,7 +237,7 @@ export class ApprovalChannel {
       { prepend: true },
     );
     this.deps.logger.info(
-      `[dsh-yashiro] QQ 审批通道已挂载（可点的人=${this.approvers.length === 0 ? "群里任何人" : this.approvers.join("、")}，超时 ${Math.round(this.timeoutMs / 1000)}s）`,
+      `QQ 审批通道已挂载（可点的人=${this.deps.approvers.length === 0 ? "群里任何人" : this.deps.approvers.join("、")}，超时 ${Math.round(this.deps.timeoutMs / 1000)}s）`,
     );
   }
 
@@ -287,7 +248,7 @@ export class ApprovalChannel {
     const button = decodeApprovalButton(raw);
     if (button === undefined) return undefined;
 
-    const scope: "group" | "c2c" = event.scene === "group" ? "group" : "c2c";
+    const scope: Scope = event.scene === "group" ? "group" : "c2c";
     const peerId =
       scope === "group"
         ? (event.group_openid ?? "")
@@ -295,7 +256,7 @@ export class ApprovalChannel {
     if (peerId === "") return undefined;
 
     // 一个群可能有多条会话，但待审批的只会是「这个群当前正在用的那条」
-    const sessionId = this.deps.currentSessionOf(scope, peerId);
+    const sessionId = this.deps.currentSessionOf({ scope, peerId });
     if (sessionId === undefined) return undefined;
     const entry = this.pending.get(sessionId);
     if (entry === undefined) return undefined;
@@ -304,15 +265,16 @@ export class ApprovalChannel {
       scope === "group"
         ? (event.group_member_openid ?? event.user_openid)
         : event.user_openid;
-    if (this.approvers.length > 0 && !this.approvers.includes(clicker ?? "")) {
-      this.deps.logger.warn(
-        `[dsh-yashiro] 审批按钮被未授权的人点击：${clicker ?? "(未知)"}`,
-      );
+    if (
+      this.deps.approvers.length > 0 &&
+      !this.deps.approvers.includes(clicker ?? "")
+    ) {
+      this.deps.logger.warn(`审批按钮被未授权的人点击：${clicker ?? "(未知)"}`);
       return 4;
     }
 
     this.deps.logger.info(
-      `[dsh-yashiro] 审批${button.d === "allow" ? "允许" : "拒绝"}：${entry.target.scope} ${entry.target.peerId}`,
+      `审批${button.d === "allow" ? "允许" : "拒绝"}：${entry.target.scope} ${entry.target.peerId}`,
     );
     this.settle(
       entry.sessionId,
@@ -338,29 +300,25 @@ export class ApprovalChannel {
 
   private async park(
     sessionId: string,
-    target: ApprovalTarget,
+    target: PeerRef,
     request: ApprovalRequest,
   ): Promise<ApprovalOutcome> {
     const key = sessionId;
     if (request.signal?.aborted) return "cancelled";
     if (this.pending.has(key)) {
-      this.deps.logger.warn(
-        `[dsh-yashiro] 该会话已有待审批请求，这一条按不可用处理：${key}`,
-      );
+      this.deps.logger.warn(`该会话已有待审批请求，这一条按不可用处理：${key}`);
       return "unavailable";
     }
 
     try {
       await this.deps.send(
         target,
-        buildApprovalText(request, commandOf(request), this.timeoutMs),
-        buildApprovalKeyboard(this.approvers),
+        buildApprovalText(request, commandOf(request), this.deps.timeoutMs),
+        buildApprovalKeyboard(this.deps.approvers),
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.deps.logger.error(
-        `[dsh-yashiro] 审批卡片发送失败（按不可用处理）：${message}`,
-      );
+      this.deps.logger.error(`审批卡片发送失败（按不可用处理）：${message}`);
       return "unavailable";
     }
 
@@ -370,12 +328,10 @@ export class ApprovalChannel {
         target,
         resolve,
         timer: setTimeout(() => {
-          this.deps.logger.warn(
-            `[dsh-yashiro] 审批超时未处理，按拒绝收场：${key}`,
-          );
+          this.deps.logger.warn(`审批超时未处理，按拒绝收场：${key}`);
           this.settle(key, "rejected");
           void this.notifyTimeout(target);
-        }, this.timeoutMs),
+        }, this.deps.timeoutMs),
       };
       if (request.signal !== undefined) {
         entry.signal = request.signal;
@@ -383,9 +339,7 @@ export class ApprovalChannel {
         request.signal.addEventListener("abort", entry.onAbort, { once: true });
       }
       this.pending.set(key, entry);
-      this.deps.logger.info(
-        `[dsh-yashiro] 审批卡片已发到 QQ，等待点击：${key}`,
-      );
+      this.deps.logger.info(`审批卡片已发到 QQ，等待点击：${key}`);
     });
   }
 
@@ -400,15 +354,15 @@ export class ApprovalChannel {
     entry.resolve(outcome);
   }
 
-  private async notifyTimeout(target: ApprovalTarget): Promise<void> {
+  private async notifyTimeout(target: PeerRef): Promise<void> {
     try {
       await this.deps.send(
         target,
-        `⏱ ${Math.round(this.timeoutMs / 60_000)} 分钟没人处理，这条审批已按**拒绝**处理。`,
+        `⏱ ${Math.round(this.deps.timeoutMs / 60_000)} 分钟没人处理，这条审批已按**拒绝**处理。`,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.deps.logger.warn(`[dsh-yashiro] 审批超时提示发送失败：${message}`);
+      this.deps.logger.warn(`审批超时提示发送失败：${message}`);
     }
   }
 }

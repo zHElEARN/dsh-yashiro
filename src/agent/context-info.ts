@@ -44,7 +44,6 @@ export interface ContextSummary {
   turns: number;
   steps: number;
   userMessages: number;
-  assistantMessages: number;
   toolCalls: number;
 }
 
@@ -73,7 +72,6 @@ export function summarizeSessionLog(log: SessionLogLike): ContextSummary {
     turns: 0,
     steps: 0,
     userMessages: 0,
-    assistantMessages: 0,
     toolCalls: 0,
   };
 
@@ -113,7 +111,6 @@ export function summarizeSessionLog(log: SessionLogLike): ContextSummary {
         break;
       }
       case "assistant/message": {
-        summary.assistantMessages += 1;
         const usage = (event.data as { usage?: UsageLike } | undefined)?.usage;
         if (usage !== undefined) applyUsage(summary, usage);
         break;

@@ -1,15 +1,7 @@
 import assert from "node:assert/strict";
-import {
-  closeSync,
-  ftruncateSync,
-  mkdirSync,
-  openSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, ftruncateSync, openSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { describe, it } from "node:test";
 
 import {
   chunkText,
@@ -18,6 +10,7 @@ import {
   normalizeInbound,
   stripMentionMarkers,
 } from "../../dist/qq/gateway.js";
+import { tempDir } from "../helpers.mjs";
 
 /** 实测到的真实 payload 形态（全量模式下 @ 消息也叫 GROUP_MESSAGE_CREATE） */
 const inbound = {
@@ -283,9 +276,7 @@ describe("classifyMedia", () => {
 });
 
 describe("inspectFileForSend", () => {
-  const dir = join(tmpdir(), `yashiro-sendfile-${process.pid}-${Date.now()}`);
-  mkdirSync(dir, { recursive: true });
-  after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = tempDir("sendfile");
 
   it("普通文件给出类型/文件名/大小", () => {
     const path = join(dir, "report.pdf");

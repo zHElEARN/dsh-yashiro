@@ -1,9 +1,6 @@
 /**
- * 一个 QQ 会话（群 / 单聊）对应一条 dsh agent 会话。
- *
- * SessionId 由 sessionKey 做 SHA-256 确定性派生，所以不需要映射表：同一来源永远
- * 路由到同一条会话，进程重启后能 resume 回来。以后要做多会话切换，只要往
- * sessionKey 里再拼一维（topic / epoch），派生出来自然就是另一条会话。
+ * 一个 QQ 会话（群 / 单聊）可以有多条 dsh 会话，SessionId 由 sessionKey 做 SHA-256
+ * 确定性派生：同一个 epoch 永远对应同一条会话，所以不需要映射表，进程重启后能 resume 回来。
  */
 import { createHash } from "node:crypto";
 
@@ -18,7 +15,8 @@ import type {
 import type { SessionId } from "@deepseek-ai/dsh-session";
 
 import { describeError } from "../core/errors.js";
-import type { ApprovalTarget } from "../qq/approval.js";
+import type { Logger } from "../core/logger.js";
+import type { PeerRef } from "../core/types.js";
 
 interface SessionEntry {
   agent: Agent;
@@ -34,17 +32,13 @@ interface WorkspaceRegistryLike {
   resolveByPath(path: string): Promise<WorkspaceLike | undefined>;
 }
 
-/**
- * 同一个 QQ 会话里第 epoch 条 dsh 会话的 key。epoch 由绑定表分配，所以同一个 epoch
- * 永远派生出同一个 SessionId —— 重启后能 resume 回同一条，不需要额外映射。
- */
+/** 同一个 QQ 会话里第 epoch 条 dsh 会话的 key；epoch 由绑定表分配 */
 export function sessionKeyOf(
   appId: string,
-  scope: "group" | "c2c",
-  peerId: string,
+  peer: PeerRef,
   epoch: number,
 ): string {
-  return `yashiro:${appId}:${scope}:${peerId}:${epoch}`;
+  return `yashiro:${appId}:${peer.scope}:${peer.peerId}:${epoch}`;
 }
 
 export function sessionIdOf(key: string): SessionId {
@@ -55,7 +49,7 @@ export class SessionManager {
   /** 只放内存里活着的 agent；SessionId 是它的唯一标识 */
   private readonly sessions = new Map<SessionId, SessionEntry>();
   /** sessionId → 会话身份：审批通道按 `request.agent.id` 反查卡片该发到哪儿 */
-  private readonly targets = new Map<SessionId, ApprovalTarget>();
+  private readonly targets = new Map<SessionId, PeerRef>();
   /** 解析出来的 workspace：undefined = 还没找过，null = 找过但没有 */
   private workspaceEntity: WorkspaceLike | null | undefined;
 
@@ -63,14 +57,11 @@ export class SessionManager {
     private readonly ctx: Context,
     private readonly appId: string,
     private readonly cwd: string | undefined,
-    private readonly logger: {
-      info(message: string): void;
-      debug(message: string): void;
-    },
+    private readonly logger: Logger,
   ) {}
 
   /** 按 sessionId 找本插件的会话；不是本插件的会话返回 undefined */
-  findTarget(sessionId: string): ApprovalTarget | undefined {
+  findTarget(sessionId: string): PeerRef | undefined {
     return this.targets.get(sessionId as SessionId);
   }
 
@@ -113,7 +104,7 @@ export class SessionManager {
       const found = await registry.resolveByPath(this.cwd);
       if (found === undefined) {
         this.logger.debug(
-          `[dsh-yashiro] 启动目录不是已注册的 workspace，跳过挂载：${this.cwd}`,
+          `启动目录不是已注册的 workspace，跳过挂载：${this.cwd}`,
         );
         return null;
       }
@@ -121,7 +112,7 @@ export class SessionManager {
       return found;
     } catch (err) {
       this.logger.info(
-        `[dsh-yashiro] 查找 workspace 失败（不影响对话）：${describeError(err)}`,
+        `查找 workspace 失败（不影响对话）：${describeError(err)}`,
       );
       return null;
     }
@@ -141,7 +132,7 @@ export class SessionManager {
       await workspace.attachSession(sessionId);
     } catch (err) {
       this.logger.info(
-        `[dsh-yashiro] 挂载 workspace 失败（不影响对话）：${describeError(err)}`,
+        `挂载 workspace 失败（不影响对话）：${describeError(err)}`,
       );
     }
   }
@@ -151,14 +142,11 @@ export class SessionManager {
    * 建不出来会抛错，调用方据此决定要不要落绑定 —— 先有会话再有绑定，不会留下悬空指针。
    */
   async create(
-    scope: "group" | "c2c",
-    peerId: string,
+    peer: PeerRef,
     epoch: number,
     setup: AgentSetup,
   ): Promise<Agent> {
-    const sessionId = sessionIdOf(
-      sessionKeyOf(this.appId, scope, peerId, epoch),
-    );
+    const sessionId = sessionIdOf(sessionKeyOf(this.appId, peer, epoch));
     const agentOptions = this.resolveAgentOptions();
     const handle = await this.ctx.agents.create({
       sessionId,
@@ -166,7 +154,7 @@ export class SessionManager {
       ...(agentOptions ? { agentOptions } : {}),
       setup,
     });
-    this.remember(sessionId, handle, scope, peerId);
+    this.remember(sessionId, handle, peer);
     await this.attachToWorkspace(sessionId);
     return handle.agent;
   }
@@ -178,8 +166,7 @@ export class SessionManager {
    * 否则会话文件被删掉之后，这里会悄悄给出一条空会话，看起来像切换成功了。
    */
   async select(
-    scope: "group" | "c2c",
-    peerId: string,
+    peer: PeerRef,
     sessionId: string,
     setup: AgentSetup,
   ): Promise<Agent | undefined> {
@@ -194,12 +181,7 @@ export class SessionManager {
     // 已经在 live registry 里（例如插件热重载后），复用即可 —— 但没有拆除权
     const live = this.ctx.agents.get(id);
     if (live) {
-      this.remember(
-        id,
-        { agent: live, dispose: async () => {} },
-        scope,
-        peerId,
-      );
+      this.remember(id, { agent: live, dispose: async () => {} }, peer);
       await this.attachToWorkspace(id);
       return live;
     }
@@ -212,13 +194,11 @@ export class SessionManager {
         ...(agentOptions ? { agentOptions } : {}),
         setup,
       });
-      this.remember(id, handle, scope, peerId);
+      this.remember(id, handle, peer);
       await this.attachToWorkspace(id);
       return handle.agent;
     } catch (err) {
-      this.logger.info(
-        `[dsh-yashiro] 会话连不上（不回退成新建）：${describeError(err)}`,
-      );
+      this.logger.info(`会话连不上（不回退成新建）：${describeError(err)}`);
       return undefined;
     }
   }
@@ -226,14 +206,13 @@ export class SessionManager {
   private remember(
     sessionId: SessionId,
     handle: AgentHandle,
-    scope: "group" | "c2c",
-    peerId: string,
+    peer: PeerRef,
   ): void {
     this.sessions.set(sessionId, {
       agent: handle.agent,
       dispose: () => handle.dispose(),
     });
-    this.targets.set(sessionId, { scope, peerId });
+    this.targets.set(sessionId, peer);
   }
 
   /** 拆除全部会话（插件卸载时调用） */
