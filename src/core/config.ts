@@ -23,7 +23,7 @@ export interface Config {
   historyDbPath?: string;
   /** @ 时是否附带告诉 agent「自你上次开口以来群里还有几条新消息」 */
   announceNewMessageCount: boolean;
-  /** 允许点审批按钮的 openid 白名单。空数组 = 群里任何人都能点，填了则平台侧和回执处各校验一次 */
+  /** 允许点审批按钮的 openid 白名单。**空数组 = 审批停用**（谁都不能审批，提权请求直接按不可用收场）；非空时平台侧和回执处各校验一次 */
   approvers: string[];
   /** 审批卡片无人处理多久后按「拒绝」收场（秒） */
   approvalTimeoutSeconds: number;

@@ -29,20 +29,20 @@ dsh --profile yashiro
 
 ## 配置项
 
-| 配置                      | 默认                                        | 说明                                                                                            |
-| ------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `appId` / `appSecret`     | 必填                                        | QQ 开放平台凭据                                                                                 |
-| `sandbox`                 | `false`                                     | 指向 `sandbox.api.sgroup.qq.com`                                                                |
-| `cwd`                     | 进程 cwd                                    | agent 工作目录（决定会话落在哪个 workspace 分桶）                                               |
-| `allowedGroups`           | `[]`                                        | 群 openid 白名单。**空 = 一个群都不放行**，必须显式列                                           |
-| `allowedUsers`            | `[]`                                        | 单聊 openid 白名单。**空 = 一个都不放行**                                                       |
-| `blockedSenders`          | `[]`                                        | 发送者 openid 黑名单。只拦 @ 触发，**不影响消息入库**                                           |
-| `historyDbPath`           | `$DSH_HOME/storages/dsh-yashiro/history.db` | 群历史库。留空即用默认路径                                                                      |
+| 配置                      | 默认                                        | 说明                                                                                                              |
+| ------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `appId` / `appSecret`     | 必填                                        | QQ 开放平台凭据                                                                                                   |
+| `sandbox`                 | `false`                                     | 指向 `sandbox.api.sgroup.qq.com`                                                                                  |
+| `cwd`                     | 进程 cwd                                    | agent 工作目录（决定会话落在哪个 workspace 分桶）                                                                 |
+| `allowedGroups`           | `[]`                                        | 群 openid 白名单。**空 = 一个群都不放行**，必须显式列                                                             |
+| `allowedUsers`            | `[]`                                        | 单聊 openid 白名单。**空 = 一个都不放行**                                                                         |
+| `blockedSenders`          | `[]`                                        | 发送者 openid 黑名单。只拦 @ 触发，**不影响消息入库**                                                             |
+| `historyDbPath`           | `$DSH_HOME/storages/dsh-yashiro/history.db` | 群历史库。留空即用默认路径                                                                                        |
 | `announceNewMessageCount` | `true`                                      | @ 时附带「上次唤醒投递到 #编号；此后新增 N 条没 @ 你的消息」——那个编号可以直接喂给 `qqbot_history` 的 `after_seq` |
-| `busyDelivery`            | `'steer'`                                   | 它正在跑回合时新 @ 进来的消息：`steer` 插队（下个 step 就被看到）／`queue` 排队（等下一个回合） |
-| `approvers`               | `[]`                                        | 谁能点审批卡片的「允许一次」（openid 白名单）。**空 = 群里任何人都能点**（与腾讯官方插件一致）  |
-| `approvalTimeoutSeconds`  | `300`                                       | 审批卡片无人处理多久后按「拒绝」收场                                                            |
-| `debug`                   | `false`                                     | 打开后写 DEBUG 级文件日志                                                                       |
+| `busyDelivery`            | `'steer'`                                   | 它正在跑回合时新 @ 进来的消息：`steer` 插队（下个 step 就被看到）／`queue` 排队（等下一个回合）                   |
+| `approvers`               | `[]`                                        | 谁能点审批卡片的「允许一次」（openid 白名单）。**空 = 谁都不能审批**：不发卡片，提权请求一律按不可用收场          |
+| `approvalTimeoutSeconds`  | `300`                                       | 审批卡片无人处理多久后按「拒绝」收场                                                                              |
+| `debug`                   | `false`                                     | 打开后写 DEBUG 级文件日志                                                                                         |
 
 ## 会话与指令
 

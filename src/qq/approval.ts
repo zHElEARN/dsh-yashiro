@@ -149,15 +149,20 @@ type ButtonPermission =
 
 /**
  * 允许一次 / 拒绝。`group_id` 相同是为了点过一个另一个就变灰，`click_limit: 1`
- * 限制每个按钮只能点一次；approvers 非空时按钮在平台侧也只对名单内的人可点。
+ * 限制每个按钮只能点一次；按钮在平台侧也只对名单内的人可点。
  */
 export function buildApprovalKeyboard(
   approvers: readonly string[],
 ): InlineKeyboard {
-  const permission: ButtonPermission =
-    approvers.length > 0
-      ? ({ type: 0, specify_user_ids: [...approvers] } as ButtonPermission)
-      : ({ type: 2 } as ButtonPermission);
+  if (approvers.length === 0) {
+    throw new Error(
+      "buildApprovalKeyboard 需要非空的审批名单：空名单意味着审批停用，不该发卡片",
+    );
+  }
+  const permission = {
+    type: 0,
+    specify_user_ids: [...approvers],
+  } as ButtonPermission;
 
   const button = (
     id: string,
@@ -204,7 +209,7 @@ interface PendingApproval {
 }
 
 export interface ApprovalChannelDeps {
-  /** 空数组 = 群里任何人都能点 */
+  /** 空数组 = 审批停用（谁都不能审批）：不发卡片，请求直接按 unavailable 收场 */
   approvers: readonly string[];
   /** 多久无人处理按拒绝收场（毫秒）；由配置的 approvalTimeoutSeconds 换算而来 */
   timeoutMs: number;
@@ -236,8 +241,14 @@ export class ApprovalChannel {
         ),
       { prepend: true },
     );
+    if (this.deps.approvers.length === 0) {
+      this.deps.logger.warn(
+        "QQ 审批通道已挂载，但 approvers 为空 —— 审批停用：提权请求一律按 unavailable 处理，没有人能审批",
+      );
+      return;
+    }
     this.deps.logger.info(
-      `QQ 审批通道已挂载（可点的人=${this.deps.approvers.length === 0 ? "群里任何人" : this.deps.approvers.join("、")}，超时 ${Math.round(this.deps.timeoutMs / 1000)}s）`,
+      `QQ 审批通道已挂载（可点的人=${this.deps.approvers.join("、")}，超时 ${Math.round(this.deps.timeoutMs / 1000)}s）`,
     );
   }
 
@@ -265,10 +276,7 @@ export class ApprovalChannel {
       scope === "group"
         ? (event.group_member_openid ?? event.user_openid)
         : event.user_openid;
-    if (
-      this.deps.approvers.length > 0 &&
-      !this.deps.approvers.includes(clicker ?? "")
-    ) {
+    if (!this.deps.approvers.includes(clicker ?? "")) {
       this.deps.logger.warn(`审批按钮被未授权的人点击：${clicker ?? "(未知)"}`);
       return 4;
     }
@@ -305,6 +313,10 @@ export class ApprovalChannel {
   ): Promise<ApprovalOutcome> {
     const key = sessionId;
     if (request.signal?.aborted) return "cancelled";
+    if (this.deps.approvers.length === 0) {
+      this.deps.logger.info(`审批停用（approvers 为空），按不可用处理：${key}`);
+      return "unavailable";
+    }
     if (this.pending.has(key)) {
       this.deps.logger.warn(`该会话已有待审批请求，这一条按不可用处理：${key}`);
       return "unavailable";

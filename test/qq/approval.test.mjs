@@ -51,7 +51,8 @@ describe("button_data 编解码", () => {
 });
 
 describe("buildApprovalKeyboard", () => {
-  const buttons = buildApprovalKeyboard([]).content.rows[0].buttons;
+  const approvers = ["04929CA16A512F57CFBCC3AD77A5D640"];
+  const buttons = buildApprovalKeyboard(approvers).content.rows[0].buttons;
 
   it("两个按钮，都是回调且只能点一次", () => {
     assert.equal(buttons.length, 2);
@@ -64,14 +65,13 @@ describe("buildApprovalKeyboard", () => {
     assert.equal(buttons[0].group_id, buttons[1].group_id);
   });
 
-  it("approvers 为空 = 所有人可点", () => {
-    assert.equal(buttons[0].action.permission.type, 2);
+  it("名单为空直接抛错（审批停用时不该走到发卡片）", () => {
+    assert.throws(() => buildApprovalKeyboard([]), /非空/);
   });
 
   it("指定审批人：type=0 + specify_user_ids", () => {
-    const restricted = buildApprovalKeyboard([
-      "04929CA16A512F57CFBCC3AD77A5D640",
-    ]).content.rows[0].buttons[0];
+    const restricted =
+      buildApprovalKeyboard(approvers).content.rows[0].buttons[0];
     assert.equal(restricted.action.permission.type, 0);
     assert.equal(
       restricted.action.permission.specify_user_ids?.[0],
