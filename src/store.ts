@@ -1,17 +1,37 @@
 /**
  * 群消息历史库：群里所有消息（含没 @ 机器人的）都落这里，只有 @ 过的会进 agent 上下文。
  *
- * 用 node:sqlite（Node 22.5+ 内置）零原生依赖；检索用 LIKE 而非 FTS5 —— FTS5 默认
+ * 驱动是 node:sqlite（Node 内置）零原生依赖；表结构定义在 `db/schema.ts`（唯一事实源），
+ * 建库与升级由 `db/index.ts` 里的 drizzle 迁移完成。检索用 LIKE 而非 FTS5 —— FTS5 默认
  * 分词器对中文几乎没用，群消息又以中文为主。
+ *
+ * 本文件对外只暴露 HistoryStore 与下面这些类型，调用方（index / agent / qq 各层）不该看到 drizzle。
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
+
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  lt,
+  lte,
+  max,
+  min,
+  type SQL,
+  sql,
+  count as sqlCount,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 
 import { platformNowIso } from "./core/time.js";
 import type { ChatKey, MentionInfo, Scope } from "./core/types.js";
+import { type HistoryDb, openHistoryDb } from "./db/index.js";
+import { messages, sessionBindings } from "./db/schema.js";
 
 /** 只记录平台给的元信息，不下载文件、不持久化 */
 export interface AttachmentInfo {
@@ -122,7 +142,7 @@ export function defaultHistoryDbPath(): string {
 }
 
 export class HistoryStore {
-  private readonly db: DatabaseSync;
+  private readonly db: HistoryDb;
   /** 插件日志会写到同目录下 */
   readonly path: string;
   /** 见 now() —— 保证绑定表的时间戳严格递增 */
@@ -141,49 +161,10 @@ export class HistoryStore {
     return this.lastStamp;
   }
 
+  /** 打开库并把 schema 迁移到最新；建目录、WAL、迁移都在 db/index.ts 里 */
   constructor(path: string) {
     this.path = path;
-    mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA synchronous = NORMAL");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS messages (
-        seq           INTEGER PRIMARY KEY AUTOINCREMENT,
-        app_id        TEXT    NOT NULL,
-        scope         TEXT    NOT NULL,
-        peer_id       TEXT    NOT NULL,
-        message_id    TEXT    NOT NULL,
-        sender_id     TEXT    NOT NULL,
-        sender_name   TEXT,
-        content       TEXT    NOT NULL,
-        mentions_bot  INTEGER NOT NULL DEFAULT 0,
-        mentions      TEXT,
-        quoted_content TEXT,
-        msg_idx       TEXT,
-        quoted_msg_idx TEXT,
-        attachments   TEXT,
-        raw_event_type TEXT   NOT NULL,
-        timestamp     TEXT    NOT NULL,
-        ts            INTEGER NOT NULL
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msgid ON messages(app_id, message_id);
-      CREATE INDEX IF NOT EXISTS idx_messages_peer_ts ON messages(app_id, peer_id, ts);
-      CREATE INDEX IF NOT EXISTS idx_messages_msgidx ON messages(app_id, peer_id, msg_idx);
-
-      CREATE TABLE IF NOT EXISTS session_bindings (
-        app_id      TEXT    NOT NULL,
-        scope       TEXT    NOT NULL,
-        peer_id     TEXT    NOT NULL,
-        epoch       INTEGER NOT NULL,
-        session_id  TEXT    NOT NULL,
-        created_at  INTEGER NOT NULL,
-        updated_at  INTEGER NOT NULL,
-        is_current  INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (app_id, scope, peer_id, epoch)
-      );
-      CREATE INDEX IF NOT EXISTS idx_bindings_current ON session_bindings(app_id, scope, peer_id, is_current);
-    `);
+    this.db = openHistoryDb(path);
   }
 
   /**
@@ -194,39 +175,47 @@ export class HistoryStore {
    */
   append(msg: StoredMessage): number | undefined {
     const ts = Date.parse(msg.timestamp);
-    const info = this.db
-      .prepare(
-        `INSERT OR IGNORE INTO messages
-           (app_id, scope, peer_id, message_id, sender_id, sender_name, content,
-            mentions_bot, mentions, quoted_content, msg_idx, quoted_msg_idx,
-            attachments, raw_event_type, timestamp, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        msg.appId,
-        msg.scope,
-        msg.peerId,
-        msg.messageId,
-        msg.senderId,
-        msg.senderName ?? null,
-        msg.content,
-        msg.mentionsBot ? 1 : 0,
-        msg.mentions?.length ? JSON.stringify(msg.mentions) : null,
-        msg.quotedContent ?? null,
-        msg.msgIdx ?? null,
-        msg.quotedMsgIdx ?? null,
-        msg.attachments?.length ? JSON.stringify(msg.attachments) : null,
-        msg.rawEventType,
-        msg.timestamp,
-        Number.isFinite(ts) ? ts : Date.now(),
-      );
+    const inserted = this.db
+      .insert(messages)
+      .values({
+        appId: msg.appId,
+        scope: msg.scope,
+        peerId: msg.peerId,
+        messageId: msg.messageId,
+        senderId: msg.senderId,
+        senderName: msg.senderName ?? null,
+        content: msg.content,
+        mentionsBot: msg.mentionsBot,
+        mentions: msg.mentions?.length ? JSON.stringify(msg.mentions) : null,
+        quotedContent: msg.quotedContent ?? null,
+        msgIdx: msg.msgIdx ?? null,
+        quotedMsgIdx: msg.quotedMsgIdx ?? null,
+        attachments: msg.attachments?.length
+          ? JSON.stringify(msg.attachments)
+          : null,
+        rawEventType: msg.rawEventType,
+        timestamp: msg.timestamp,
+        ts: Number.isFinite(ts) ? ts : Date.now(),
+      })
+      // 撞上 (app_id, message_id) 唯一索引就当没发生，配合 returning 判断到底插没插进去
+      .onConflictDoNothing()
+      .returning({ seq: messages.seq })
+      .all();
 
-    if (info.changes > 0) return Number(info.lastInsertRowid);
+    const row = inserted[0];
+    if (row !== undefined) return Number(row.seq);
 
-    // 被 INSERT OR IGNORE 忽略了（平台重推）：lastInsertRowid 是上一条的，不能信
+    // 被忽略的（平台重推）走这里：补一次查询拿到已存在那行的 seq
     const existing = this.db
-      .prepare("SELECT seq FROM messages WHERE app_id = ? AND message_id = ?")
-      .get(msg.appId, msg.messageId) as { seq: number } | undefined;
+      .select({ seq: messages.seq })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.appId, msg.appId),
+          eq(messages.messageId, msg.messageId),
+        ),
+      )
+      .get();
     return existing === undefined ? undefined : Number(existing.seq);
   }
 
@@ -259,12 +248,10 @@ export class HistoryStore {
   /** 当前会话；这个群/单聊还没建过任何会话时返回 undefined */
   getCurrentSession(key: ChatKey): SessionBinding | undefined {
     const row = this.db
-      .prepare(
-        `SELECT app_id, scope, peer_id, epoch, session_id, created_at, updated_at
-           FROM session_bindings
-          WHERE app_id = ? AND scope = ? AND peer_id = ? AND is_current = 1`,
-      )
-      .get(key.appId, key.scope, key.peerId);
+      .select(BINDING_COLUMNS)
+      .from(sessionBindings)
+      .where(and(bindingKeyFilter(key), eq(sessionBindings.isCurrent, true)))
+      .get();
     return row === undefined ? undefined : toSessionBinding(row);
   }
 
@@ -276,30 +263,53 @@ export class HistoryStore {
    */
   nextEpoch(key: ChatKey): number {
     const row = this.db
-      .prepare(
-        `SELECT COALESCE(MAX(epoch), 0) AS max_epoch
-           FROM session_bindings WHERE app_id = ? AND scope = ? AND peer_id = ?`,
-      )
-      .get(key.appId, key.scope, key.peerId) as
-      | { max_epoch: number }
-      | undefined;
-    return Number(row?.max_epoch ?? 0) + 1;
+      .select({ maxEpoch: max(sessionBindings.epoch) })
+      .from(sessionBindings)
+      .where(bindingKeyFilter(key))
+      .get();
+    return Number(row?.maxEpoch ?? 0) + 1;
   }
 
-  /** 新建一条会话（epoch 取当前最大值 +1）并切成 current，返回新绑定 */
+  /**
+   * 新建一条会话（epoch 取当前最大值 +1）并切成 current，返回新绑定。
+   *
+   * 取号、插入、清旧 current、标记新 current 在一个事务里 —— 分开做的话两个进程
+   * 同时建会话会撞 epoch（主键冲突）或留下两条 current。
+   */
   createSession(key: ChatKey, sessionId: string): SessionBinding {
-    const epoch = this.nextEpoch(key);
     const now = this.now();
 
-    this.db
-      .prepare(
-        `INSERT INTO session_bindings
-           (app_id, scope, peer_id, epoch, session_id, created_at, updated_at, is_current)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-      )
-      .run(key.appId, key.scope, key.peerId, epoch, sessionId, now, now);
+    const epoch = this.db.transaction((tx) => {
+      const row = tx
+        .select({ maxEpoch: max(sessionBindings.epoch) })
+        .from(sessionBindings)
+        .where(bindingKeyFilter(key))
+        .get();
+      const next = Number(row?.maxEpoch ?? 0) + 1;
 
-    this.setCurrentSession(key, epoch);
+      tx.insert(sessionBindings)
+        .values({
+          ...key,
+          epoch: next,
+          sessionId,
+          createdAt: now,
+          updatedAt: now,
+          isCurrent: false,
+        })
+        .run();
+
+      tx.update(sessionBindings)
+        .set({ isCurrent: false })
+        .where(bindingKeyFilter(key))
+        .run();
+      tx.update(sessionBindings)
+        .set({ isCurrent: true, updatedAt: this.now() })
+        .where(and(bindingKeyFilter(key), eq(sessionBindings.epoch, next)))
+        .run();
+
+      return next;
+    });
+
     return { epoch, sessionId, createdAt: now, updatedAt: now };
   }
 
@@ -308,55 +318,52 @@ export class HistoryStore {
    * 群的当前会话变成「无」，@ 就不再回应了。
    */
   setCurrentSession(key: ChatKey, epoch: number): boolean {
-    const { appId, scope, peerId } = key;
-    const exists = this.db
-      .prepare(
-        "SELECT 1 AS ok FROM session_bindings WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?",
-      )
-      .get(appId, scope, peerId, epoch);
-    if (exists === undefined) return false;
+    return this.db.transaction((tx) => {
+      const target = tx
+        .select({ epoch: sessionBindings.epoch })
+        .from(sessionBindings)
+        .where(and(bindingKeyFilter(key), eq(sessionBindings.epoch, epoch)))
+        .get();
+      if (target === undefined) return false;
 
-    this.db
-      .prepare(
-        "UPDATE session_bindings SET is_current = 0 WHERE app_id = ? AND scope = ? AND peer_id = ?",
-      )
-      .run(appId, scope, peerId);
-    this.db
-      .prepare(
-        `UPDATE session_bindings SET is_current = 1, updated_at = ?
-          WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?`,
-      )
-      .run(this.now(), appId, scope, peerId, epoch);
-    return true;
+      tx.update(sessionBindings)
+        .set({ isCurrent: false })
+        .where(bindingKeyFilter(key))
+        .run();
+      tx.update(sessionBindings)
+        .set({ isCurrent: true, updatedAt: this.now() })
+        .where(and(bindingKeyFilter(key), eq(sessionBindings.epoch, epoch)))
+        .run();
+      return true;
+    });
   }
 
   /** 刷新「最近使用」；列表就是按它倒序排的，每次投递后都要调 */
   touchSession(key: ChatKey, epoch: number): void {
     this.db
-      .prepare(
-        `UPDATE session_bindings SET updated_at = ?
-          WHERE app_id = ? AND scope = ? AND peer_id = ? AND epoch = ?`,
-      )
-      .run(this.now(), key.appId, key.scope, key.peerId, epoch);
+      .update(sessionBindings)
+      .set({ updatedAt: this.now() })
+      .where(and(bindingKeyFilter(key), eq(sessionBindings.epoch, epoch)))
+      .run();
   }
 
   /** 某个群/单聊的全部会话，按最近使用倒序；page 从 1 开始 */
   listSessions(key: ChatKey, page: number, perPage: number): SessionPage {
-    const { appId, scope, peerId } = key;
-    const where = "app_id = ? AND scope = ? AND peer_id = ?";
+    const filter = bindingKeyFilter(key);
     const countRow = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM session_bindings WHERE ${where}`)
-      .get(appId, scope, peerId) as { n: number } | undefined;
+      .select({ n: sqlCount() })
+      .from(sessionBindings)
+      .where(filter)
+      .get();
 
     const rows = this.db
-      .prepare(
-        `SELECT app_id, scope, peer_id, epoch, session_id, created_at, updated_at
-           FROM session_bindings
-          WHERE ${where}
-          ORDER BY updated_at DESC, epoch DESC
-          LIMIT ? OFFSET ?`,
-      )
-      .all(appId, scope, peerId, perPage, (page - 1) * perPage);
+      .select(BINDING_COLUMNS)
+      .from(sessionBindings)
+      .where(filter)
+      .orderBy(desc(sessionBindings.updatedAt), desc(sessionBindings.epoch))
+      .limit(perPage)
+      .offset((page - 1) * perPage)
+      .all();
 
     return {
       sessions: rows.map(toSessionBinding),
@@ -372,72 +379,101 @@ export class HistoryStore {
    * 出现重叠或空洞。`ts` 只负责展示与时间过滤。
    */
   search(opts: SearchOptions): HistoryRow[] {
-    const { where, params } = buildFilter(opts);
-    const order = opts.order === "asc" ? "ASC" : "DESC";
-    const all = [...params, Math.max(1, Math.floor(opts.limit))];
+    // 引用者那条消息：同群同 app 内按 msg_idx 对上 quoted_msg_idx
+    const quoted = alias(messages, "q");
 
     const rows = this.db
-      .prepare(
-        `SELECT ${ROW_COLUMNS}
-           FROM messages m
-           LEFT JOIN messages q
-             ON q.app_id = m.app_id AND q.peer_id = m.peer_id
-            AND q.msg_idx = m.quoted_msg_idx
-          WHERE ${where.join(" AND ")}
-          ORDER BY m.seq ${order}
-          LIMIT ?`,
+      .select({
+        seq: messages.seq,
+        appId: messages.appId,
+        scope: messages.scope,
+        peerId: messages.peerId,
+        messageId: messages.messageId,
+        senderId: messages.senderId,
+        senderName: messages.senderName,
+        content: messages.content,
+        mentionsBot: messages.mentionsBot,
+        mentions: messages.mentions,
+        quotedContent: messages.quotedContent,
+        msgIdx: messages.msgIdx,
+        quotedMsgIdx: messages.quotedMsgIdx,
+        attachments: messages.attachments,
+        rawEventType: messages.rawEventType,
+        timestamp: messages.timestamp,
+        ts: messages.ts,
+        quotedSenderId: quoted.senderId,
+        quotedSenderName: quoted.senderName,
+      })
+      .from(messages)
+      .leftJoin(
+        quoted,
+        and(
+          eq(quoted.appId, messages.appId),
+          eq(quoted.peerId, messages.peerId),
+          eq(quoted.msgIdx, messages.quotedMsgIdx),
+        ),
       )
-      .all(...all);
+      .where(and(...messageFilter(opts)))
+      .orderBy(opts.order === "asc" ? asc(messages.seq) : desc(messages.seq))
+      .limit(Math.max(1, Math.floor(opts.limit)))
+      .all();
 
     return rows.map(toHistoryRow);
   }
 
   /** 同一组过滤条件下的条数，用来告诉模型"还有多少条没取" */
   count(opts: MessageFilter): number {
-    const { where, params } = buildFilter(opts);
     const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM messages m WHERE ${where.join(" AND ")}`,
-      )
-      .get(...params) as { n: number } | undefined;
+      .select({ n: sqlCount() })
+      .from(messages)
+      .where(and(...messageFilter(opts)))
+      .get();
     return Number(row?.n ?? 0);
   }
 
   /** 整个 QQ 会话的规模（不带任何过滤），结果头部的"地图"用它 */
   stats(key: ChatKey): MessageStats {
     const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts
-           FROM messages WHERE app_id = ? AND scope = ? AND peer_id = ?`,
-      )
-      .get(key.appId, key.scope, key.peerId) as
-      | { n: number; first_ts: number | null; last_ts: number | null }
-      | undefined;
+      .select({
+        n: sqlCount(),
+        firstTs: min(messages.ts),
+        lastTs: max(messages.ts),
+      })
+      .from(messages)
+      .where(and(...messageFilter(key)))
+      .get();
+
     return {
       total: Number(row?.n ?? 0),
-      ...(row?.first_ts === null || row?.first_ts === undefined
+      ...(row?.firstTs === null || row?.firstTs === undefined
         ? {}
-        : { firstTs: Number(row.first_ts) }),
-      ...(row?.last_ts === null || row?.last_ts === undefined
+        : { firstTs: Number(row.firstTs) }),
+      ...(row?.lastTs === null || row?.lastTs === undefined
         ? {}
-        : { lastTs: Number(row.last_ts) }),
+        : { lastTs: Number(row.lastTs) }),
     };
   }
 
   /** 该会话自某个时间点以来有多少条消息；excludeMentions 为真时只数非 @ 的 */
   countSince(key: ChatKey, sinceMs: number, excludeMentions = false): number {
-    const sql = excludeMentions
-      ? "SELECT COUNT(*) AS n FROM messages WHERE app_id = ? AND peer_id = ? AND ts > ? AND mentions_bot = 0"
-      : "SELECT COUNT(*) AS n FROM messages WHERE app_id = ? AND peer_id = ? AND ts > ?";
-    const row = this.db.prepare(sql).get(key.appId, key.peerId, sinceMs) as
-      | { n: number }
-      | undefined;
-    return row?.n ?? 0;
+    const conditions = [
+      eq(messages.appId, key.appId),
+      eq(messages.peerId, key.peerId),
+      gt(messages.ts, sinceMs),
+    ];
+    if (excludeMentions) conditions.push(eq(messages.mentionsBot, false));
+
+    const row = this.db
+      .select({ n: sqlCount() })
+      .from(messages)
+      .where(and(...conditions))
+      .get();
+    return Number(row?.n ?? 0);
   }
 
   close(): void {
     try {
-      this.db.close();
+      this.db.$client.close();
     } catch {
       /* 已被关闭 */
     }
@@ -449,78 +485,71 @@ function likePattern(text: string): string {
   return `%${text.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
 }
 
-/** search 取的列；引用者两列来自自连接 */
-const ROW_COLUMNS = `m.seq, m.app_id, m.scope, m.peer_id, m.message_id, m.sender_id,
-        m.sender_name, m.content, m.mentions_bot, m.mentions, m.quoted_content,
-        m.msg_idx, m.quoted_msg_idx, m.attachments, m.raw_event_type, m.timestamp, m.ts,
-        q.sender_id AS quoted_sender_id, q.sender_name AS quoted_sender_name`;
+/** 会话绑定的四列：SELECT 与返回对象一一对应 */
+const BINDING_COLUMNS = {
+  epoch: sessionBindings.epoch,
+  sessionId: sessionBindings.sessionId,
+  createdAt: sessionBindings.createdAt,
+  updatedAt: sessionBindings.updatedAt,
+};
+
+/** 绑定表的定位条件：一个 appId 下的一个 QQ 会话 */
+function bindingKeyFilter(key: ChatKey): SQL {
+  return and(
+    eq(sessionBindings.appId, key.appId),
+    eq(sessionBindings.scope, key.scope),
+    eq(sessionBindings.peerId, key.peerId),
+  ) as SQL;
+}
 
 /**
  * 过滤条件 → WHERE 片段。
  *
- * search 与 count 共用同一套：两边要是走岔了，结果头部那句"还有 N 条"就是错的。
+ * search / count / stats 共用同一套：要是走岔了，结果头部那句"还有 N 条"就是错的。
  */
-function buildFilter(opts: MessageFilter): {
-  where: string[];
-  params: Array<string | number>;
-} {
-  const where: string[] = ["m.app_id = ?"];
-  const params: Array<string | number> = [opts.appId];
+function messageFilter(opts: MessageFilter): SQL[] {
+  const conditions: SQL[] = [eq(messages.appId, opts.appId)];
 
-  if (opts.scope) {
-    where.push("m.scope = ?");
-    params.push(opts.scope);
-  }
-  if (opts.peerId) {
-    where.push("m.peer_id = ?");
-    params.push(opts.peerId);
-  }
+  if (opts.scope) conditions.push(eq(messages.scope, opts.scope));
+  if (opts.peerId) conditions.push(eq(messages.peerId, opts.peerId));
   if (opts.query) {
     // 附件是 JSON 列，整列 LIKE 就等于匹配文件名与 URL
-    where.push(
-      "(m.content LIKE ? ESCAPE '\\' OR m.quoted_content LIKE ? ESCAPE '\\' OR m.attachments LIKE ? ESCAPE '\\')",
-    );
     const like = likePattern(opts.query);
-    params.push(like, like, like);
+    conditions.push(sql`(
+      ${messages.content} LIKE ${like} ESCAPE '\\'
+      OR ${messages.quotedContent} LIKE ${like} ESCAPE '\\'
+      OR ${messages.attachments} LIKE ${like} ESCAPE '\\'
+    )`);
   }
   if (opts.sender) {
     // 昵称取不到时（单聊）只能靠 openid，所以两边都匹配
-    where.push(
-      "(m.sender_name LIKE ? ESCAPE '\\' OR m.sender_id LIKE ? ESCAPE '\\')",
-    );
     const like = likePattern(opts.sender);
-    params.push(like, like);
+    conditions.push(sql`(
+      ${messages.senderName} LIKE ${like} ESCAPE '\\'
+      OR ${messages.senderId} LIKE ${like} ESCAPE '\\'
+    )`);
   }
-  if (opts.since !== undefined) {
-    where.push("m.ts >= ?");
-    params.push(opts.since);
-  }
-  if (opts.until !== undefined) {
-    where.push("m.ts <= ?");
-    params.push(opts.until);
-  }
+  if (opts.since !== undefined) conditions.push(gte(messages.ts, opts.since));
+  if (opts.until !== undefined) conditions.push(lte(messages.ts, opts.until));
   if (opts.beforeSeq !== undefined) {
-    where.push("m.seq < ?");
-    params.push(opts.beforeSeq);
+    conditions.push(lt(messages.seq, opts.beforeSeq));
   }
   if (opts.afterSeq !== undefined) {
-    where.push("m.seq > ?");
-    params.push(opts.afterSeq);
+    conditions.push(gt(messages.seq, opts.afterSeq));
   }
   if (opts.mentionsMe !== undefined) {
-    where.push("m.mentions_bot = ?");
-    params.push(opts.mentionsMe ? 1 : 0);
+    conditions.push(eq(messages.mentionsBot, opts.mentionsMe));
   }
 
-  return { where, params };
+  return conditions;
 }
 
-function toSessionBinding(row: Record<string, unknown>): SessionBinding {
+function toSessionBinding(row: RawSessionBinding): SessionBinding {
   return {
     epoch: Number(row.epoch),
-    sessionId: String(row.session_id),
-    createdAt: Number(row.created_at),
-    updatedAt: Number(row.updated_at),
+    sessionId: String(row.sessionId),
+    createdAt: Number(row.createdAt),
+    updatedAt: Number(row.updatedAt),
   };
 }
 
@@ -534,42 +563,66 @@ function parseJson<T>(value: unknown): T | undefined {
   }
 }
 
-function toHistoryRow(row: Record<string, unknown>): HistoryRow {
+/** 绑定表查出来的原始行 */
+interface RawSessionBinding {
+  epoch: number;
+  sessionId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** search 查出来的原始行（列名已在 select 里映射成 camelCase） */
+interface RawHistoryRow {
+  seq: number;
+  appId: string;
+  scope: string;
+  peerId: string;
+  messageId: string;
+  senderId: string;
+  senderName: string | null;
+  content: string;
+  mentionsBot: boolean;
+  mentions: string | null;
+  quotedContent: string | null;
+  msgIdx: string | null;
+  quotedMsgIdx: string | null;
+  attachments: string | null;
+  rawEventType: string;
+  timestamp: string;
+  ts: number;
+  quotedSenderId: string | null;
+  quotedSenderName: string | null;
+}
+
+function toHistoryRow(row: RawHistoryRow): HistoryRow {
   return {
     seq: Number(row.seq),
-    appId: String(row.app_id),
+    appId: String(row.appId),
     scope: String(row.scope) === "c2c" ? "c2c" : "group",
-    peerId: String(row.peer_id),
-    messageId: String(row.message_id),
-    senderId: String(row.sender_id),
-    senderName:
-      row.sender_name === null || row.sender_name === undefined
-        ? undefined
-        : String(row.sender_name),
+    peerId: String(row.peerId),
+    messageId: String(row.messageId),
+    senderId: String(row.senderId),
+    senderName: optional(row.senderName),
     content: String(row.content),
-    mentionsBot: Number(row.mentions_bot) === 1,
+    mentionsBot: row.mentionsBot,
     mentions: parseJson<MentionInfo[]>(row.mentions),
-    quotedContent:
-      row.quoted_content === null || row.quoted_content === undefined
-        ? undefined
-        : String(row.quoted_content),
-    msgIdx:
-      row.msg_idx === null || row.msg_idx === undefined
-        ? undefined
-        : String(row.msg_idx),
-    quotedMsgIdx:
-      row.quoted_msg_idx === null || row.quoted_msg_idx === undefined
-        ? undefined
-        : String(row.quoted_msg_idx),
+    quotedContent: optional(row.quotedContent),
+    msgIdx: optional(row.msgIdx),
+    quotedMsgIdx: optional(row.quotedMsgIdx),
     attachments: parseJson<AttachmentInfo[]>(row.attachments),
-    rawEventType: String(row.raw_event_type),
+    rawEventType: String(row.rawEventType),
     timestamp: String(row.timestamp),
     ts: Number(row.ts),
-    ...(row.quoted_sender_id === null || row.quoted_sender_id === undefined
+    ...(optional(row.quotedSenderId) === undefined
       ? {}
-      : { quotedSenderId: String(row.quoted_sender_id) }),
-    ...(row.quoted_sender_name === null || row.quoted_sender_name === undefined
+      : { quotedSenderId: String(row.quotedSenderId) }),
+    ...(optional(row.quotedSenderName) === undefined
       ? {}
-      : { quotedSenderName: String(row.quoted_sender_name) }),
+      : { quotedSenderName: String(row.quotedSenderName) }),
   };
+}
+
+/** 可空列 → 可选字段：库里是 null，插件内部一律用 undefined */
+function optional(value: string | null): string | undefined {
+  return value === null ? undefined : String(value);
 }

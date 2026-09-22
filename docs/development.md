@@ -31,6 +31,15 @@
 - **引用的说话人靠平台序号反查**：入库时存 `msg_idx` / `quoted_msg_idx`，检索时自连接取被引用那条的说话人；查不到就整行不显示，不猜。
 - **唤醒消息里的锚点**：`（你上次被唤醒时投递到 #124；此后群里新增 3 条没 @ 你的消息。）` —— agent 用 `after_seq=124` 就能一步取到自己错过的那些。锚点是内存态，重启后第一次唤醒没有。
 
+## 历史库与迁移
+
+- **schema 的唯一事实源是 `src/db/schema.ts`**（drizzle 表定义）。建库与升级在 `src/db/index.ts`：开 `DatabaseSync` → WAL → 同步跑完 `drizzle/` 下的迁移。插件启动时（`apply()` 第一行）自动完成，用户不需要管库。
+- **改 schema 的流程**：改 `src/db/schema.ts` → `pnpm db:generate` → 提交 `drizzle/` 下新增的 `<14位时间戳>_<名字>/migration.sql`。迁移目录与 `dist/` 同级、随包发布（`package.json` 的 `files` 里有 `drizzle`），运行时用 `import.meta.url` 定位。
+- **已应用的迁移不许改**：账本 `__drizzle_migrations` 只按迁移目录名比对，**不校验内容 checksum** —— 改掉一条已应用的 `migration.sql` 既不会重跑也不会报错，只会让线上库和 `schema.ts` 悄悄分叉。要改就再加一条迁移。
+- **迁移失败即加载失败**：结构不对时插件宁可起不来，也不带着半截 schema 继续跑。
+- **两条守卫用例**在 `test/db/migrate.test.mjs`：①「老库升级」——只在 baseline 上建库、塞数据，再加一条迁移，断言数据还在、账本记两行、新列生效；②「schema 一致性」——把迁移建出的真实库结构（列 / 类型 / NOT NULL / 默认值 / 主键 / 索引）与 `schema.ts` 逐项对比，拦住「改了 schema 忘了 generate」。
+- **依赖是预发布的**：`drizzle-orm` / `drizzle-kit` 一律锁 `1.0.0-rc.4` —— `node:sqlite` driver 只存在于 1.0 线，stable 0.45.x 只剩 better-sqlite3 这类原生驱动（会破坏零原生依赖）；而且两边必须同线，否则会互相拒绝迁移目录格式。另外 drizzle 的 node:sqlite session 每条查询都会调 `stmt.setReturnArrays`，所以 `engines.node` 不能低于 22.18。
+
 ## 设计取舍
 
 | 决定                                                      | 原因                                                                                                                                                                                                                           |
@@ -87,5 +96,6 @@ pnpm dump-session    # 打印本 workspace 最新一条会话的完整事件流
 - **旧会话不会自动清理**：一直留在 `~/.dsh/sessions/<分桶>/<sessionId>/`，要清理得手动删。
 - **审批没有 allow-always**：dsh 的审批 outcome 是闭合集合，只有 `allowed-once` 是放行。
 - **历史检索用 LIKE 而非 FTS5**：FTS5 默认分词器对中文基本没用。
+- **`mentions` / `attachments` 两个 JSON 列不用 drizzle 的 `mode: "json"`**：那个模式读到坏数据会抛，一条烂行不该让整个检索挂掉；序列化与容错解析都在 `store.ts` 里手工做。
 - **附件只把元信息交给 agent**：插件不下载、不持久化 —— 由 agent 自己决定何时 `curl` 下来再 `read_image`。
 - **上下文压缩还没做**：要压缩的话，旧历史怎么留还没想清楚。

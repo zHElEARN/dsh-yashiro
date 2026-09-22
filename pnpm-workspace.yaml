@@ -1,0 +1,5 @@
+# pnpm 12 会把被拦下的依赖构建脚本记在这里。esbuild 只有 drizzle-kit（开发期生成迁移）
+# 会用到，它的平台二进制由 optionalDependencies 提供，不需要跑 postinstall —— 实测
+# `pnpm db:generate` 在不开构建脚本的情况下可用。
+allowBuilds:
+  esbuild: false
